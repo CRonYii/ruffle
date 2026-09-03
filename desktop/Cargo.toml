@@ -16,7 +16,7 @@ cpal = { workspace = true }
 egui = { workspace = true }
 egui_extras = { workspace = true, default-features = false, features = ["image"] }
 egui-wgpu = { workspace = true, features = ["winit"] }
-image = { workspace = true, features = ["png"] }
+image = { workspace = true, features = ["jpeg", "png"] }
 egui-winit = { workspace = true }
 fontdb = "0.23"
 ruffle_core = { path = "../core", features = ["audio", "clap", "mp3", "aac", "nellymoser", "default_compatibility_rules", "egui"] }

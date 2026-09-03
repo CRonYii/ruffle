@@ -8,6 +8,7 @@ use ruffle_core::events::{GamepadButton, KeyCode};
 use ruffle_core::{LoadBehavior, PlayerRuntime, StageAlign, StageScaleMode};
 use ruffle_render::quality::StageQuality;
 use ruffle_render_wgpu::clap::{GraphicsBackend, PowerPreference};
+use std::num::NonZeroUsize;
 use std::path::Path;
 use std::str::FromStr;
 use std::time::Duration;
@@ -209,17 +210,21 @@ pub struct Opt {
     #[clap(long)]
     pub no_gui: bool,
 
-    /// Directory in which to periodically capture the rendered movie as PNG files.
+    /// Directory in which to periodically capture the rendered movie as JPEG files.
     #[clap(long)]
     pub screenshot_directory: Option<std::path::PathBuf>,
 
     /// Number of seconds between periodic movie screenshots.
     #[clap(
         long,
-        default_value = "5",
+        default_value = "1",
         value_parser(parse_positive_duration_seconds)
     )]
     pub screenshot_interval: Duration,
+
+    /// Maximum number of periodic movie screenshots to retain.
+    #[clap(long, default_value = "21600")]
+    pub screenshot_max_files: NonZeroUsize,
 
     /// Remaps a specific button on a gamepad to a keyboard key.
     /// This can be used to add new gamepad support to existing games, for example mapping

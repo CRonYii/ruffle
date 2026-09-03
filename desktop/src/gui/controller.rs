@@ -10,6 +10,7 @@ use crate::preferences::GlobalPreferences;
 use anyhow::anyhow;
 use egui::{Context, FontData, FontDefinitions, ViewportId};
 use fontdb::{Database, Family, Query, Source};
+use image::codecs::jpeg::JpegEncoder;
 use ruffle_core::events::{ImeCursorArea, ImePurpose};
 use ruffle_core::{Player, PlayerEvent};
 use ruffle_frontend_utils::content::ContentDescriptor;
@@ -19,7 +20,9 @@ use ruffle_render_wgpu::backend::{
 use ruffle_render_wgpu::descriptors::Descriptors;
 use ruffle_render_wgpu::utils::{format_list, get_backend_names};
 use std::any::Any;
+use std::collections::VecDeque;
 use std::fs::File;
+use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -34,23 +37,45 @@ struct ScreenshotCapture {
     directory: PathBuf,
     interval: Duration,
     next_capture: Instant,
+    max_files: usize,
+    captures: VecDeque<PathBuf>,
 }
 
 impl ScreenshotCapture {
-    const MAX_FILES: usize = 24;
+    const JPEG_QUALITY: u8 = 85;
 
-    fn new(directory: PathBuf, interval: Duration) -> anyhow::Result<Self> {
+    fn new(directory: PathBuf, interval: Duration, max_files: usize) -> anyhow::Result<Self> {
         std::fs::create_dir_all(&directory).map_err(|error| {
             anyhow!(
                 "Couldn't create screenshot directory {}: {error}",
                 directory.display()
             )
         })?;
-        Ok(Self {
+        let mut captures: Vec<_> = std::fs::read_dir(&directory)
+            .map_err(|error| {
+                anyhow!(
+                    "Couldn't read screenshot directory {}: {error}",
+                    directory.display()
+                )
+            })?
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("frame-") && name.ends_with(".jpg"))
+            })
+            .collect();
+        captures.sort();
+        let mut capture = Self {
             directory,
             interval,
             next_capture: Instant::now() + interval,
-        })
+            max_files,
+            captures: captures.into(),
+        };
+        capture.prune();
+        Ok(capture)
     }
 
     fn next_path(&mut self) -> Option<PathBuf> {
@@ -63,25 +88,19 @@ impl ScreenshotCapture {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis();
-        Some(self.directory.join(format!("frame-{timestamp}.png")))
+        Some(self.directory.join(format!("frame-{timestamp}.jpg")))
     }
 
-    fn prune(&self) {
-        let Ok(entries) = std::fs::read_dir(&self.directory) else {
-            return;
-        };
-        let mut captures: Vec<_> = entries
-            .flatten()
-            .map(|entry| entry.path())
-            .filter(|path| {
-                path.file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| name.starts_with("frame-") && name.ends_with(".png"))
-            })
-            .collect();
-        captures.sort();
-        let remove_count = captures.len().saturating_sub(Self::MAX_FILES);
-        for path in captures.into_iter().take(remove_count) {
+    fn record(&mut self, path: PathBuf) {
+        self.captures.push_back(path);
+        self.prune();
+    }
+
+    fn prune(&mut self) {
+        while self.captures.len() > self.max_files {
+            let Some(path) = self.captures.pop_front() else {
+                break;
+            };
             if let Err(error) = std::fs::remove_file(&path) {
                 tracing::warn!(path = %path.display(), %error, "Couldn't prune movie screenshot");
             }
@@ -227,7 +246,13 @@ impl GuiController {
             .cli
             .screenshot_directory
             .clone()
-            .map(|directory| ScreenshotCapture::new(directory, preferences.cli.screenshot_interval))
+            .map(|directory| {
+                ScreenshotCapture::new(
+                    directory,
+                    preferences.cli.screenshot_interval,
+                    preferences.cli.screenshot_max_files.get(),
+                )
+            })
             .transpose()?;
 
         Ok(Self {
@@ -563,11 +588,20 @@ impl GuiController {
                 <dyn Any>::downcast_ref::<WgpuRenderBackend<MovieView>>(player.renderer_mut())
                     .expect("Renderer must be correct type");
             let image = renderer.target().capture(&self.descriptors);
-            match image.save(&path) {
+            let result = File::create(&path)
+                .map_err(image::ImageError::IoError)
+                .and_then(|file| {
+                    JpegEncoder::new_with_quality(
+                        BufWriter::new(file),
+                        ScreenshotCapture::JPEG_QUALITY,
+                    )
+                    .encode_image(&image)
+                });
+            match result {
                 Ok(()) => {
                     tracing::info!(path = %path.display(), "Captured movie screenshot");
-                    if let Some(capture) = &self.screenshot_capture {
-                        capture.prune();
+                    if let Some(capture) = self.screenshot_capture.as_mut() {
+                        capture.record(path);
                     }
                 }
                 Err(error) => {
