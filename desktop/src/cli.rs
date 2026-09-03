@@ -209,6 +209,18 @@ pub struct Opt {
     #[clap(long)]
     pub no_gui: bool,
 
+    /// Directory in which to periodically capture the rendered movie as PNG files.
+    #[clap(long)]
+    pub screenshot_directory: Option<std::path::PathBuf>,
+
+    /// Number of seconds between periodic movie screenshots.
+    #[clap(
+        long,
+        default_value = "5",
+        value_parser(parse_positive_duration_seconds)
+    )]
+    pub screenshot_interval: Duration,
+
     /// Remaps a specific button on a gamepad to a keyboard key.
     /// This can be used to add new gamepad support to existing games, for example mapping
     /// the D-pad to the arrow keys with -B d-pad-up=up -B d-pad-down=down etc.
@@ -251,6 +263,14 @@ fn parse_movie_file_or_url(path: &str) -> Result<Url, Error> {
 
 fn parse_duration_seconds(value: &str) -> Result<Duration, Error> {
     Ok(Duration::from_secs_f64(value.parse()?))
+}
+
+fn parse_positive_duration_seconds(value: &str) -> Result<Duration, Error> {
+    let seconds = value.parse::<f64>()?;
+    if !seconds.is_finite() || seconds <= 0.0 {
+        return Err(anyhow!("screenshot interval must be greater than zero"));
+    }
+    Ok(Duration::from_secs_f64(seconds))
 }
 
 fn parse_align(value: &str) -> Result<StageAlign, Error> {

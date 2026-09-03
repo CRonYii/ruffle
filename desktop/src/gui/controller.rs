@@ -20,15 +20,74 @@ use ruffle_render_wgpu::descriptors::Descriptors;
 use ruffle_render_wgpu::utils::{format_list, get_backend_names};
 use std::any::Any;
 use std::fs::File;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, MutexGuard};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use url::Url;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::WindowEvent;
 use winit::event_loop::EventLoopProxy;
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{ImePurpose as WinitImePurpose, Theme, Window};
+
+struct ScreenshotCapture {
+    directory: PathBuf,
+    interval: Duration,
+    next_capture: Instant,
+}
+
+impl ScreenshotCapture {
+    const MAX_FILES: usize = 24;
+
+    fn new(directory: PathBuf, interval: Duration) -> anyhow::Result<Self> {
+        std::fs::create_dir_all(&directory).map_err(|error| {
+            anyhow!(
+                "Couldn't create screenshot directory {}: {error}",
+                directory.display()
+            )
+        })?;
+        Ok(Self {
+            directory,
+            interval,
+            next_capture: Instant::now() + interval,
+        })
+    }
+
+    fn next_path(&mut self) -> Option<PathBuf> {
+        let now = Instant::now();
+        if now < self.next_capture {
+            return None;
+        }
+        self.next_capture = now + self.interval;
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        Some(self.directory.join(format!("frame-{timestamp}.png")))
+    }
+
+    fn prune(&self) {
+        let Ok(entries) = std::fs::read_dir(&self.directory) else {
+            return;
+        };
+        let mut captures: Vec<_> = entries
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("frame-") && name.ends_with(".png"))
+            })
+            .collect();
+        captures.sort();
+        let remove_count = captures.len().saturating_sub(Self::MAX_FILES);
+        for path in captures.into_iter().take(remove_count) {
+            if let Err(error) = std::fs::remove_file(&path) {
+                tracing::warn!(path = %path.display(), %error, "Couldn't prune movie screenshot");
+            }
+        }
+    }
+}
 
 /// Integration layer connecting wgpu+winit to egui.
 pub struct GuiController {
@@ -48,6 +107,7 @@ pub struct GuiController {
     /// If this is set, we should not render the main menu.
     no_gui: bool,
     theme_controller: ThemeController,
+    screenshot_capture: Option<ScreenshotCapture>,
     #[cfg(feature = "tracy_images")]
     tracy_frame_captures: crate::tracy::FrameCapturesHolder,
 }
@@ -163,6 +223,12 @@ impl GuiController {
 
         #[cfg(feature = "tracy_images")]
         let tracy_frame_captures = crate::tracy::FrameCapturesHolder::new(&descriptors.device);
+        let screenshot_capture = preferences
+            .cli
+            .screenshot_directory
+            .clone()
+            .map(|directory| ScreenshotCapture::new(directory, preferences.cli.screenshot_interval))
+            .transpose()?;
 
         Ok(Self {
             descriptors,
@@ -178,6 +244,7 @@ impl GuiController {
             size,
             no_gui,
             theme_controller,
+            screenshot_capture,
             #[cfg(feature = "tracy_images")]
             tracy_frame_captures,
         })
@@ -485,6 +552,29 @@ impl GuiController {
         }
         command_buffers.push(encoder.finish());
         self.descriptors.queue.submit(command_buffers);
+
+        if let Some(path) = self
+            .screenshot_capture
+            .as_mut()
+            .and_then(ScreenshotCapture::next_path)
+            && let Some(player) = player.as_deref_mut()
+        {
+            let renderer =
+                <dyn Any>::downcast_ref::<WgpuRenderBackend<MovieView>>(player.renderer_mut())
+                    .expect("Renderer must be correct type");
+            let image = renderer.target().capture(&self.descriptors);
+            match image.save(&path) {
+                Ok(()) => {
+                    tracing::info!(path = %path.display(), "Captured movie screenshot");
+                    if let Some(capture) = &self.screenshot_capture {
+                        capture.prune();
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(path = %path.display(), %error, "Couldn't save movie screenshot")
+                }
+            }
+        }
 
         // Free textures only after submitting the command buffer that may still
         // reference them.  Destroying a texture before its usage is submitted
