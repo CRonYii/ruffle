@@ -9,7 +9,7 @@ use crate::context::UpdateContext;
 use crate::net_connection::{NetConnectionHandle, RtmpSocketEvent};
 use crate::string::AvmString;
 
-use async_channel::{Receiver, Sender, unbounded};
+use async_channel::{Receiver, Sender, bounded, unbounded};
 use gc_arena::Collect;
 use ruffle_macros::istr;
 use slotmap::{SlotMap, new_key_type};
@@ -17,6 +17,9 @@ use std::{
     cell::{Cell, RefCell},
     time::Duration,
 };
+
+const SOCKET_ACTION_QUEUE_CAPACITY: usize = 16 * 1024;
+const MAX_SOCKET_ACTIONS_PER_UPDATE: usize = 1024;
 
 new_key_type! {
     pub struct SocketHandle;
@@ -76,7 +79,7 @@ pub struct Sockets<'gc> {
 
 impl<'gc> Sockets<'gc> {
     pub fn empty() -> Self {
-        let (sender, receiver) = unbounded();
+        let (sender, receiver) = bounded(SOCKET_ACTION_QUEUE_CAPACITY);
 
         Self {
             sockets: SlotMap::with_key(),
@@ -227,8 +230,11 @@ impl<'gc> Sockets<'gc> {
     pub fn update_sockets(context: &mut UpdateContext<'gc>) {
         let mut actions = vec![];
 
-        while let Ok(action) = context.sockets.receiver.try_recv() {
-            actions.push(action)
+        while actions.len() < MAX_SOCKET_ACTIONS_PER_UPDATE {
+            let Ok(action) = context.sockets.receiver.try_recv() else {
+                break;
+            };
+            actions.push(action);
         }
 
         for action in actions {
@@ -443,7 +449,16 @@ fn sanitize_host(host: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::sanitize_host;
+    use super::{SOCKET_ACTION_QUEUE_CAPACITY, Sockets, sanitize_host};
+
+    #[test]
+    fn socket_action_queue_is_bounded() {
+        let sockets = Sockets::empty();
+        assert_eq!(
+            sockets.sender.capacity(),
+            Some(SOCKET_ACTION_QUEUE_CAPACITY)
+        );
+    }
 
     #[test]
     fn truncate_host_at_null() {
