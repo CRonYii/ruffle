@@ -177,8 +177,12 @@ pub struct Opt {
 
     /// Spoofs the HTTP cookie header.
     /// This is a string of the form "name1=value1; name2=value2".
-    #[clap(long)]
+    #[clap(long, conflicts_with = "cookie_stdin")]
     pub cookie: Option<String>,
+
+    /// Reads one HTTP cookie header line from standard input.
+    #[clap(long, conflicts_with = "cookie")]
+    pub cookie_stdin: bool,
 
     /// The version of the player to emulate
     #[clap(long)]

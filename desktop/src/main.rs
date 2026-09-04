@@ -31,6 +31,7 @@ use ruffle_core::StaticCallstack;
 use std::cell::RefCell;
 use std::env;
 use std::fs::File;
+use std::io::Read as _;
 use std::panic::PanicHookInfo;
 use tracing_subscriber::fmt::Layer;
 use tracing_subscriber::layer::SubscriberExt;
@@ -149,7 +150,22 @@ fn main() -> Result<(), Error> {
     #[cfg(windows)]
     let _console = windows::Console::attach();
 
-    let opt = Opt::parse();
+    let mut opt = Opt::parse();
+    if opt.cookie_stdin {
+        let mut input = String::new();
+        std::io::stdin()
+            .read_to_string(&mut input)
+            .context("Failed to read cookie from standard input")?;
+        let mut lines = input.lines();
+        let cookie = lines
+            .next()
+            .filter(|line| !line.is_empty())
+            .context("Cookie input must contain one non-empty line")?;
+        if lines.next().is_some() {
+            return Err(Error::msg("Cookie input must contain exactly one line"));
+        }
+        opt.cookie = Some(cookie.to_owned());
+    }
     let preferences = GlobalPreferences::load(opt)?;
 
     let logs_path = &preferences.cli.cache_directory.join("log");
