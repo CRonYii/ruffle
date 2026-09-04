@@ -3141,6 +3141,7 @@ impl<'gc> TInteractiveObject<'gc> for MovieClip<'gc> {
             // but a child button can have an invisible hit area outside the parent's bounds.
             let mut options = HitTestOptions::SKIP_INVISIBLE;
             options.set(HitTestOptions::SKIP_MASK, self.maskee().is_none());
+            let custom_hit_area = self.hit_area();
 
             let mut found_propagate = None;
 
@@ -3172,8 +3173,11 @@ impl<'gc> TInteractiveObject<'gc> for MovieClip<'gc> {
                 .filter(|child| child.as_interactive().is_none());
 
             for child in interactive.into_iter().chain(non_interactive) {
-                // Mask children are not clickable
-                if child.clip_depth() > 0 || child.maskee().is_some() {
+                // Mask children and a Sprite designated as this object's hit area are not clickable.
+                if child.clip_depth() > 0
+                    || child.maskee().is_some()
+                    || DisplayObject::option_ptr_eq(custom_hit_area, Some(child))
+                {
                     continue;
                 }
 
@@ -3189,7 +3193,8 @@ impl<'gc> TInteractiveObject<'gc> for MovieClip<'gc> {
                             Avm2MousePick::Miss
                         }
                     }
-                } else if child.hit_test_shape(context, point, options)
+                } else if custom_hit_area.is_none()
+                    && child.hit_test_shape(context, point, options)
                     && child
                         .masker()
                         .map(|mask| mask.hit_test_shape(context, point, options))
@@ -3236,15 +3241,29 @@ impl<'gc> TInteractiveObject<'gc> for MovieClip<'gc> {
             }
 
             // A 'propagated' event from a child seems to have lower 'priority' than anything else.
-            if let Some(propagate) = found_propagate {
+            if custom_hit_area.is_none()
+                && let Some(propagate) = found_propagate
+            {
                 return propagate.combine_with_parent(self.into());
             }
 
-            // Check drawing, because this selects the current clip, it must have mouse enabled
-            if self.world_bounds(BoundsMode::Engine).contains(point)
-                && let Some(drawing) = self.drawing()
-                && drawing.hit_test(local_matrix * point, &local_matrix)
-            {
+            let own_shape_hit = if let Some(hit_area) = custom_hit_area {
+                let point = if hit_area.parent().is_none() {
+                    let Some(point) = self.global_to_local(point) else {
+                        return Avm2MousePick::Miss;
+                    };
+                    point
+                } else {
+                    point
+                };
+                hit_area.hit_test_shape(context, point, HitTestOptions::MOUSE_PICK)
+            } else {
+                self.world_bounds(BoundsMode::Engine).contains(point)
+                    && self.drawing().is_some_and(|drawing| {
+                        drawing.hit_test(local_matrix * point, &local_matrix)
+                    })
+            };
+            if own_shape_hit {
                 return if self.mouse_enabled() {
                     Avm2MousePick::Hit(self.into())
                 } else {
