@@ -507,9 +507,12 @@ impl NavigatorBackend for WebNavigatorBackend {
             .find(|x| x.host == host && x.port == port)
         else {
             tracing::warn!("Missing WebSocket proxy for host {}, port {}", host, port);
-            sender
-                .try_send(SocketAction::Connect(handle, ConnectionState::Failed))
-                .expect("working channel send");
+            self.spawn_future(Box::pin(async move {
+                sender
+                    .send(SocketAction::Connect(handle, ConnectionState::Failed))
+                    .await
+                    .map_err(|_| Error::FetchError("Socket action channel closed".to_string()))
+            }));
             return;
         };
 
@@ -519,31 +522,38 @@ impl NavigatorBackend for WebNavigatorBackend {
             Ok(x) => x,
             Err(e) => {
                 tracing::error!("Failed to create WebSocket, reason {:?}", e);
-                sender
-                    .try_send(SocketAction::Connect(handle, ConnectionState::Failed))
-                    .expect("working channel send");
+                self.spawn_future(Box::pin(async move {
+                    sender
+                        .send(SocketAction::Connect(handle, ConnectionState::Failed))
+                        .await
+                        .map_err(|_| Error::FetchError("Socket action channel closed".to_string()))
+                }));
                 return;
             }
         };
 
         let (mut ws_write, mut ws_read) = ws.split();
-        sender
-            .try_send(SocketAction::Connect(handle, ConnectionState::Connected))
-            .expect("working channel send");
 
         self.spawn_future(Box::pin(async move {
+            if sender
+                .send(SocketAction::Connect(handle, ConnectionState::Connected))
+                .await
+                .is_err()
+            {
+                return Ok(());
+            }
             loop {
                 match future::select(ws_read.next(), std::pin::pin!(receiver.recv())).await {
                     // Handle incoming messages.
                     Either::Left((Some(msg), _)) => match msg {
-                        Ok(Message::Bytes(buf)) => sender
-                            .try_send(SocketAction::Data(handle, buf))
-                            .expect("working channel send"),
+                        Ok(Message::Bytes(buf)) => {
+                            if sender.send(SocketAction::Data(handle, buf)).await.is_err() {
+                                break;
+                            }
+                        }
                         Ok(_) => tracing::warn!("Server sent an unexpected text message"),
                         Err(_) => {
-                            sender
-                                .try_send(SocketAction::Close(handle))
-                                .expect("working channel send");
+                            let _ = sender.send(SocketAction::Close(handle)).await;
                             break;
                         }
                     },
@@ -551,9 +561,8 @@ impl NavigatorBackend for WebNavigatorBackend {
                     Either::Right((Ok(msg), _)) => {
                         if let Err(e) = ws_write.send(Message::Bytes(msg)).await {
                             tracing::warn!("Failed to send message to WebSocket {}", e);
-                            sender
-                                .try_send(SocketAction::Close(handle))
-                                .expect("working channel send");
+                            let _ = sender.send(SocketAction::Close(handle)).await;
+                            break;
                         }
                     }
                     // The connection was closed.
