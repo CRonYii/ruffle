@@ -1008,7 +1008,10 @@ impl Amf3Encoder {
             return Ok(());
         }
         if let Some(index) = self.strings.iter().position(|string| string == value) {
-            write_u29(output, index as u32);
+            let reference = u32::try_from(index)
+                .map_err(|_| "Too many AMF3 string references".to_string())?
+                << 1;
+            write_u29(output, reference);
         } else {
             write_inline_bytes(value.as_bytes(), output)?;
             self.strings.push(value.to_string());
@@ -1450,12 +1453,12 @@ mod tests {
     fn outbound_amf3_values_use_shared_string_references() {
         let mut encoder = Amf3Encoder::default();
         let mut encoded = Vec::new();
-        for value in ["WAROVER", "victory", "WAROVER"] {
+        for value in ["WAROVER", "victory", "WAROVER", "victory"] {
             encoder
                 .encode(&AmfValue::String(value.to_string()), &mut encoded)
                 .unwrap();
         }
-        assert_eq!(encoded, b"\x06\x0fWAROVER\x06\x0fvictory\x06\x00");
+        assert_eq!(encoded, b"\x06\x0fWAROVER\x06\x0fvictory\x06\x00\x06\x02");
     }
 
     #[test]
