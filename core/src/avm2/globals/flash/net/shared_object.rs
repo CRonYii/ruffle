@@ -5,9 +5,11 @@ use crate::avm2::function::FunctionArgs;
 use crate::avm2::object::{ScriptObject, SharedObjectObject};
 use crate::avm2::parameters::ParametersExt;
 use crate::avm2::{Activation, Error, Object, Value};
+use crate::net_connection::NetConnections;
 use crate::string::AvmString;
-use crate::{avm2_stub_getter, avm2_stub_method, avm2_stub_setter};
+use crate::{avm2_stub_getter, avm2_stub_setter};
 use flash_lso::types::{AMFVersion, Lso};
+use fnv::FnvHashMap;
 use ruffle_macros::istr;
 use std::borrow::Cow;
 
@@ -174,6 +176,101 @@ pub fn get_local<'gc>(
     Ok(created_shared_object.into())
 }
 
+pub fn get_remote<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    _this: Value<'gc>,
+    args: FunctionArgs<'_, 'gc>,
+) -> Result<Value<'gc>, Error<'gc>> {
+    let name = args.get_string_non_null(activation, 0, "name")?;
+    let name = name.to_utf8_lossy();
+    const INVALID_CHARS: &str = "~%&\\;:\"',<>?# ";
+    if name.is_empty() || name.contains(|c| INVALID_CHARS.contains(c)) {
+        return Ok(Value::Null);
+    }
+    let remote_path = args
+        .try_get_string(1)
+        .map(|path| path.to_string())
+        .unwrap_or_default();
+    let cache_key = format!("remote:{remote_path}:{name}");
+    if let Some(shared_object) = activation.context.avm2_shared_objects.get(&cache_key) {
+        return Ok((*shared_object).into());
+    }
+
+    let data = ScriptObject::new_object(activation.context);
+    let shared_object = SharedObjectObject::from_remote(activation, data, name.to_string());
+    activation
+        .context
+        .avm2_shared_objects
+        .insert(cache_key, shared_object);
+    Ok(shared_object.into())
+}
+
+pub fn connect<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    this: Value<'gc>,
+    args: FunctionArgs<'_, 'gc>,
+) -> Result<Value<'gc>, Error<'gc>> {
+    let shared_object = this
+        .as_object()
+        .and_then(|object| object.as_shared_object())
+        .expect("Must be SharedObject object");
+    let connection = args
+        .try_get_object(0)
+        .and_then(|object| object.as_net_connection());
+    let Some(handle) = connection.and_then(|connection| connection.handle()) else {
+        tracing::warn!("SharedObject.connect requires an active NetConnection");
+        return Ok(Value::Undefined);
+    };
+    if !shared_object.is_remote()
+        || !NetConnections::use_remote_shared_object(
+            activation.context,
+            handle,
+            shared_object.name().clone(),
+        )
+    {
+        tracing::warn!("SharedObject.connect requires an RTMP NetConnection");
+        return Ok(Value::Undefined);
+    }
+    shared_object.set_connection(Some(handle));
+    Ok(Value::Undefined)
+}
+
+pub fn send<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    this: Value<'gc>,
+    args: FunctionArgs<'_, 'gc>,
+) -> Result<Value<'gc>, Error<'gc>> {
+    let shared_object = this
+        .as_object()
+        .and_then(|object| object.as_shared_object())
+        .expect("Must be SharedObject object");
+    let Some(handle) = shared_object.connection() else {
+        return Ok(Value::Undefined);
+    };
+    let method = args.get_string_non_null(activation, 0, "handlerName")?;
+    let mut object_table = FnvHashMap::default();
+    let arguments = args
+        .get_slice_from(1..)
+        .into_iter()
+        .map(|argument| {
+            crate::avm2::amf::serialize_value(
+                activation,
+                argument,
+                AMFVersion::AMF3,
+                &mut object_table,
+            )
+        })
+        .collect();
+    NetConnections::send_remote_shared_object(
+        activation.context,
+        handle,
+        shared_object.name().clone(),
+        method.to_string(),
+        arguments,
+    );
+    Ok(Value::Undefined)
+}
+
 pub fn get_data<'gc>(
     _activation: &mut Activation<'_, 'gc>,
     this: Value<'gc>,
@@ -247,10 +344,22 @@ pub fn get_size<'gc>(
 
 pub fn close<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    _this: Value<'gc>,
+    this: Value<'gc>,
     _args: FunctionArgs<'_, 'gc>,
 ) -> Result<Value<'gc>, Error<'gc>> {
-    avm2_stub_method!(activation, "flash.net.SharedObject", "close");
+    let shared_object = this
+        .as_object()
+        .and_then(|object| object.as_shared_object())
+        .expect("Must be SharedObject object");
+    if let Some(handle) = shared_object.connection() {
+        NetConnections::queue_remote_shared_object_event(
+            activation.context,
+            handle,
+            shared_object.name().clone(),
+            2,
+        );
+        shared_object.set_connection(None);
+    }
     Ok(Value::Undefined)
 }
 
@@ -263,12 +372,18 @@ pub fn clear<'gc>(
 
     let shared_object = this.as_shared_object().unwrap();
 
-    // Clear the local data object.
     shared_object.reset_data(activation.context);
 
-    // Delete data from storage backend.
-    let name = shared_object.name();
-    activation.context.storage.remove_key(name);
+    if let Some(handle) = shared_object.connection() {
+        NetConnections::queue_remote_shared_object_event(
+            activation.context,
+            handle,
+            shared_object.name().clone(),
+            8,
+        );
+    } else {
+        activation.context.storage.remove_key(shared_object.name());
+    }
 
     Ok(Value::Undefined)
 }

@@ -42,12 +42,29 @@ pub fn connect<'gc>(
                 connection,
                 url.to_string(),
             );
+        } else if url_lower.starts_with(WStr::from_units(b"rtmp://")) {
+            let mut object_table = FnvHashMap::default();
+            let arguments = args
+                .get_slice_from(1..)
+                .iter()
+                .map(|argument| {
+                    serialize_value(activation, argument, AMFVersion::AMF0, &mut object_table)
+                })
+                .collect();
+            if let Err(error) = NetConnections::connect_to_rtmp(
+                activation.context,
+                connection,
+                url.to_string(),
+                arguments,
+            ) {
+                tracing::warn!("Unable to connect RTMP NetConnection: {error}");
+            }
         } else {
             avm2_stub_method!(
                 activation,
                 "flash.net.NetConnection",
                 "connect",
-                "with non-null, non-http command"
+                "with unsupported protocol"
             );
         }
     } else {

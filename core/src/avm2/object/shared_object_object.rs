@@ -4,9 +4,11 @@ use crate::avm2::activation::Activation;
 use crate::avm2::object::script_object::ScriptObjectData;
 use crate::avm2::object::{Object, ScriptObject, TObject};
 use crate::context::UpdateContext;
+use crate::net_connection::NetConnectionHandle;
 use gc_arena::barrier::unlock;
 use gc_arena::{Collect, Gc, GcWeak, lock::Lock};
 use ruffle_common::utils::HasPrefixField;
+use std::cell::Cell;
 use std::fmt::Debug;
 
 #[derive(Clone, Collect, Copy)]
@@ -29,6 +31,12 @@ pub struct SharedObjectObjectData<'gc> {
 
     /// The name of this SharedObject.
     name: String,
+
+    /// The RTMP connection used by a remote SharedObject.
+    #[collect(require_static)]
+    connection: Cell<Option<NetConnectionHandle>>,
+
+    is_remote: bool,
 }
 
 impl<'gc> SharedObjectObject<'gc> {
@@ -46,6 +54,28 @@ impl<'gc> SharedObjectObject<'gc> {
                 base,
                 data: Lock::new(data),
                 name,
+                connection: Cell::new(None),
+                is_remote: false,
+            },
+        ))
+    }
+
+    pub fn from_remote(
+        activation: &mut Activation<'_, 'gc>,
+        data: Object<'gc>,
+        name: String,
+    ) -> Self {
+        let class = activation.avm2().classes().sharedobject;
+        let base = ScriptObjectData::new(class);
+
+        SharedObjectObject(Gc::new(
+            activation.gc(),
+            SharedObjectObjectData {
+                base,
+                data: Lock::new(data),
+                name,
+                connection: Cell::new(None),
+                is_remote: true,
             },
         ))
     }
@@ -67,6 +97,24 @@ impl<'gc> SharedObjectObject<'gc> {
 
     pub fn name(&self) -> &String {
         &self.0.name
+    }
+
+    pub fn is_remote(self) -> bool {
+        self.0.is_remote
+    }
+
+    pub fn connection(self) -> Option<NetConnectionHandle> {
+        self.0.connection.get()
+    }
+
+    pub fn set_connection(self, connection: Option<NetConnectionHandle>) {
+        self.0.connection.set(connection);
+    }
+}
+
+impl<'gc> SharedObjectObjectWeak<'gc> {
+    pub fn upgrade(self, mc: &gc_arena::Mutation<'gc>) -> Option<SharedObjectObject<'gc>> {
+        self.0.upgrade(mc).map(SharedObjectObject)
     }
 }
 

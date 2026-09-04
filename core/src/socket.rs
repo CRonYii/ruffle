@@ -6,6 +6,7 @@ use crate::avm2::object::{EventObject, SocketObject};
 use crate::avm2::{Activation as Avm2Activation, Avm2};
 use crate::backend::navigator::NavigatorBackend;
 use crate::context::UpdateContext;
+use crate::net_connection::{NetConnectionHandle, RtmpSocketEvent};
 use crate::string::AvmString;
 
 use async_channel::{Receiver, Sender, unbounded};
@@ -26,6 +27,7 @@ new_key_type! {
 enum SocketKind<'gc> {
     Avm2(SocketObject<'gc>),
     Avm1(Avm1Object<'gc>),
+    Rtmp(#[collect(require_static)] NetConnectionHandle),
 }
 
 #[derive(Collect)]
@@ -146,6 +148,28 @@ impl<'gc> Sockets<'gc> {
         }
     }
 
+    pub fn connect_rtmp(
+        &mut self,
+        backend: &mut dyn NavigatorBackend,
+        target: NetConnectionHandle,
+        host: String,
+        port: u16,
+    ) -> SocketHandle {
+        let (sender, receiver) = unbounded();
+        let socket = Socket::new(SocketKind::Rtmp(target), sender);
+        let handle = self.sockets.insert(socket);
+
+        backend.connect_socket(
+            sanitize_host(&host).to_string(),
+            port,
+            Duration::from_secs(20),
+            handle,
+            receiver,
+            self.sender.clone(),
+        );
+        handle
+    }
+
     pub fn is_connected(&self, handle: SocketHandle) -> bool {
         if let Some(socket) = self.sockets.get(handle) {
             socket.connected.get()
@@ -196,6 +220,7 @@ impl<'gc> Sockets<'gc> {
                 target.read_buffer().clear();
                 target.write_buffer().clear();
             }
+            SocketKind::Rtmp(_) => {}
         }
     }
 
@@ -239,6 +264,9 @@ impl<'gc> Sockets<'gc> {
                                 ExecutionReason::Special,
                             );
                         }
+                        SocketKind::Rtmp(target) => context
+                            .net_connections
+                            .queue_rtmp_socket_event(target, RtmpSocketEvent::Connected),
                     }
                 }
                 SocketAction::Connect(
@@ -277,6 +305,9 @@ impl<'gc> Sockets<'gc> {
                                 ExecutionReason::Special,
                             );
                         }
+                        SocketKind::Rtmp(target) => context
+                            .net_connections
+                            .queue_rtmp_socket_event(target, RtmpSocketEvent::Failed),
                     }
                 }
                 SocketAction::Data(handle, data) => {
@@ -351,6 +382,9 @@ impl<'gc> Sockets<'gc> {
                                 }
                             }
                         }
+                        SocketKind::Rtmp(target) => context
+                            .net_connections
+                            .queue_rtmp_socket_event(target, RtmpSocketEvent::Data(data)),
                     }
                 }
                 SocketAction::Close(handle) => {
@@ -391,6 +425,9 @@ impl<'gc> Sockets<'gc> {
                                 ExecutionReason::Special,
                             );
                         }
+                        SocketKind::Rtmp(target) => context
+                            .net_connections
+                            .queue_rtmp_socket_event(target, RtmpSocketEvent::Closed),
                     }
                 }
             }

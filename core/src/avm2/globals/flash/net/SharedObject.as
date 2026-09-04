@@ -8,9 +8,18 @@ package flash.net {
         // you will need to adjust the serialization and deserialization code
         // to work with AMF0.
 
+        private var _client:Object = this;
+
         public static native function getLocal(
             name:String,
             localPath:String = null,
+            secure:Boolean = false
+        ):SharedObject;
+
+        public static native function getRemote(
+            name:String,
+            remotePath:String = null,
+            persistence:Boolean = false,
             secure:Boolean = false
         ):SharedObject;
 
@@ -21,6 +30,16 @@ package flash.net {
         public native function flush(minDiskSpace:int = 0):String;
         public native function close():void;
         public native function clear():void;
+        public native function connect(myConnection:NetConnection, params:String = null):void;
+        public native function send(handlerName:String, ...arguments):void;
+
+        public function get client():Object {
+            return this._client;
+        }
+
+        public function set client(value:Object):void {
+            this._client = value;
+        }
 
         public function setProperty(propertyName:String, value:Object = null):void {
             this.data[propertyName] = value;
