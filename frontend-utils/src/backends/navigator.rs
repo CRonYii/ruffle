@@ -66,6 +66,14 @@ pub struct ExternalNavigatorBackend<F: FutureSpawner<Error>, I: NavigatorInterfa
     interface: I,
 }
 
+fn cookie_origin_url(base_url: &Url) -> Url {
+    let mut cookie_url = base_url.clone();
+    cookie_url.set_path("/");
+    cookie_url.set_query(None);
+    cookie_url.set_fragment(None);
+    cookie_url
+}
+
 impl<F: FutureSpawner<Error>, I: NavigatorInterface> ExternalNavigatorBackend<F, I> {
     /// Construct a navigator backend with fetch and async capability.
     #[expect(clippy::too_many_arguments)]
@@ -97,7 +105,7 @@ impl<F: FutureSpawner<Error>, I: NavigatorInterface> ExternalNavigatorBackend<F,
 
         if let Some(cookie) = cookie {
             let cookie_jar = cookie::Jar::default();
-            cookie_jar.add_cookie_str(&cookie, &base_url);
+            cookie_jar.add_cookie_str(&cookie, &cookie_origin_url(&base_url));
             let cookie_store = std::sync::Arc::new(cookie_jar);
             builder = builder.cookie_provider(cookie_store)
         }
@@ -556,6 +564,21 @@ mod tests {
             assert_eq!($receiver.recv().or(async_timeout!()).await.expect("receive action"), $action);
             assert_next_socket_actions!($receiver; $($more,)*);
         };
+    }
+
+    #[test]
+    fn spoofed_cookie_applies_across_origin_paths() {
+        use reqwest::cookie::CookieStore;
+
+        let base_url = Url::parse("https://example.com/seaweb/taoo.swf").unwrap();
+        let request_url = Url::parse("https://example.com/taoohostwar/main.php").unwrap();
+        let cookie_jar = cookie::Jar::default();
+        cookie_jar.add_cookie_str("session=value", &cookie_origin_url(&base_url));
+
+        assert_eq!(
+            cookie_jar.cookies(&request_url).unwrap().to_str().unwrap(),
+            "session=value"
+        );
     }
 
     fn new_test_backend(socket_allow: bool) -> ExternalNavigatorBackend<TestFutureSpawner, ()> {
