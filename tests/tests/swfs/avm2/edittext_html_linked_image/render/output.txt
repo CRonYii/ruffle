@@ -1,0 +1,6 @@
+first image rendered: true
+second image rendered: true
+spacing remains empty: true
+cached ancestor hides image: true
+other image stays rendered: true
+replacement removes rendering: true

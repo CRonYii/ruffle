@@ -120,6 +120,11 @@ pub struct EditTextData<'gc> {
     /// The calculated layout.
     layout: RefLock<Layout<'gc>>,
 
+    /// Images are real orphan display objects: Flash exposes parent=null.
+    /// The normal orphan manager advances their timelines.
+    html_images: RefLock<Vec<(usize, DisplayObject<'gc>)>>,
+    html_image_generation: Cell<u64>,
+
     /// Style sheet used when parsing HTML.
     style_sheet: Lock<EditTextStyleSheet<'gc>>,
 
@@ -255,7 +260,7 @@ impl<'gc> EditText<'gc> {
     ///
     /// See <https://open-flash.github.io/mirrors/as2-language-reference/TextFormat.html#getTextExtent()>.
     /// See <https://help.adobe.com/en_US/FlashPlatform/reference/actionscript/3/flash/text/TextLineMetrics.html>.
-    const GUTTER: Twips = Twips::new(40);
+    pub(crate) const GUTTER: Twips = Twips::new(40);
 
     /// Creates a new `EditText` from an SWF `DefineEditText` tag.
     pub fn from_swf_tag(
@@ -318,6 +323,8 @@ impl<'gc> EditText<'gc> {
             EditTextData {
                 base: Default::default(),
                 text_spans: RefCell::new(text_spans),
+                html_images: Default::default(),
+                html_image_generation: Cell::new(0),
                 shared: Gc::new(
                     context.gc(),
                     EditTextShared {
@@ -441,13 +448,14 @@ impl<'gc> EditText<'gc> {
     }
 
     pub fn set_text(self, text: &WStr, context: &mut UpdateContext<'gc>) {
-        if self.text() == text {
+        if self.text() == text && !self.0.text_spans.borrow().has_images() {
             // Note: this check not only prevents text relayout,
             // but it also has observable effects, because text
             // format is not being reset to the default format.
             return;
         }
 
+        self.clear_html_images(context.gc());
         if self.0.style_sheet.get().is_some() {
             // When CSS is set, text will always be treated as HTML.
             self.0.parse_html(text);
@@ -475,7 +483,7 @@ impl<'gc> EditText<'gc> {
     }
 
     pub fn set_html_text(self, text: &WStr, context: &mut UpdateContext<'gc>) {
-        if self.html_text() == text {
+        if self.html_text() == text && !self.0.text_spans.borrow().has_images() {
             // Note: this check not only prevents text relayout,
             // but it also has observable effects, because not
             // every set of spans is representable as HTML.
@@ -486,11 +494,110 @@ impl<'gc> EditText<'gc> {
         }
 
         if self.is_effectively_html() {
+            self.clear_html_images(context.gc());
             self.0.parse_html(text);
             self.relayout(context);
         } else {
             self.set_text(text, context);
         }
+    }
+
+    fn clear_html_images(self, gc: &Mutation<'gc>) {
+        for (_, image) in unlock!(Gc::write(gc, self.0), EditTextData, html_images)
+            .borrow_mut()
+            .drain(..)
+        {
+            image.set_html_image_owner(gc, None);
+        }
+        self.0
+            .html_image_generation
+            .set(self.0.html_image_generation.get().wrapping_add(1));
+    }
+
+    pub fn instantiate_html_images(
+        self,
+        activation: &mut Avm2Activation<'_, 'gc>,
+    ) -> Result<(), crate::avm2::Error<'gc>> {
+        let images: Vec<_> = self.0.text_spans.borrow().images().cloned().collect();
+        if images.is_empty() {
+            return Ok(());
+        }
+        let generation = self.0.html_image_generation.get();
+        for image in images {
+            let source = AvmString::new(activation.gc(), image.source);
+            let domain = activation
+                .caller_domain()
+                .expect("Missing caller domain in TextField.htmlText");
+            if !domain.has_defined_value_handling_vector(activation, source) {
+                // External image loading is not implemented here.
+                continue;
+            }
+            let value = domain.get_defined_value_handling_vector(activation, source)?;
+            let Some(class) = value
+                .as_object()
+                .and_then(|object| object.as_class_object())
+            else {
+                continue;
+            };
+            if activation
+                .context
+                .library
+                .avm2_class_registry()
+                .class_symbol(class.inner_class_definition())
+                .is_none()
+            {
+                continue;
+            }
+            let object = class.construct(activation, &[])?;
+            // A linked constructor can replace this field's text recursively.
+            if generation != self.0.html_image_generation.get() {
+                return Ok(());
+            }
+            let Some(display) = object
+                .as_object()
+                .and_then(|object| object.as_display_object())
+            else {
+                continue;
+            };
+            if !image.id.is_empty() {
+                display.set_name(activation.gc(), AvmString::new(activation.gc(), image.id));
+            }
+            let width = display.width();
+            let height = display.height();
+            if let Some(width) = image.width {
+                display.set_width(activation.context, width);
+            }
+            if let Some(height) = image.height {
+                display.set_height(activation.context, height);
+            }
+            display.set_html_image_owner(activation.gc(), Some(self));
+            self.0
+                .text_spans
+                .borrow_mut()
+                .set_image_size(image.index, width, height);
+            unlock!(
+                Gc::write(activation.gc(), self.0),
+                EditTextData,
+                html_images
+            )
+            .borrow_mut()
+            .push((image.index, display));
+        }
+        self.relayout(activation.context);
+        Ok(())
+    }
+
+    pub fn image_reference(self, id: &WStr) -> Option<DisplayObject<'gc>> {
+        let spans = self.0.text_spans.borrow();
+        let image = spans
+            .images()
+            .find(|image| !image.id.is_empty() && image.id == id)?;
+        self.0
+            .html_images
+            .borrow()
+            .iter()
+            .find(|(index, _)| *index == image.index)
+            .map(|(_, display)| *display)
     }
 
     pub fn text_length(self) -> usize {
@@ -830,6 +937,20 @@ impl<'gc> EditText<'gc> {
         context: &mut UpdateContext<'gc>,
     ) {
         self.0.text_spans.borrow_mut().replace_text(from, to, text);
+        self.0
+            .html_image_generation
+            .set(self.0.html_image_generation.get().wrapping_add(1));
+        let spans = self.0.text_spans.borrow();
+        unlock!(Gc::write(context.gc(), self.0), EditTextData, html_images)
+            .borrow_mut()
+            .retain(|(index, display)| {
+                let keep = spans.images().any(|image| image.index == *index);
+                if !keep {
+                    display.set_html_image_owner(context.gc(), None);
+                }
+                keep
+            });
+        drop(spans);
         self.relayout(context);
     }
 
@@ -915,6 +1036,21 @@ impl<'gc> EditText<'gc> {
         // reset scroll
         self.0.hscroll.set(0.0);
         self.0.scroll.set(1);
+
+        let matrix = self.layout_to_local_matrix();
+        for image in self.0.layout.borrow().images() {
+            if let Some((_, display)) = self
+                .0
+                .html_images
+                .borrow()
+                .iter()
+                .find(|(index, _)| *index == image.index)
+            {
+                let position = matrix * Point::new(image.position.x(), image.position.y());
+                display.set_x(position.x);
+                display.set_y(position.y);
+            }
+        }
 
         let text_size = self.0.layout.borrow().text_size();
 
@@ -2764,6 +2900,29 @@ impl<'gc> TDisplayObject<'gc> for EditText<'gc> {
             &self.0.layout.borrow(),
         );
 
+        context.transform_stack.pop();
+
+        // Image references retain unscrolled TextField-local coordinates.
+        // Apply scrolling only while rendering, without changing the objects.
+        context.transform_stack.push(&Transform {
+            matrix: Matrix::translate(
+                -Twips::from_pixels(self.0.hscroll.get()),
+                -self.0.vertical_scroll_offset(),
+            ),
+            ..Default::default()
+        });
+        for image in self.0.layout.borrow().images() {
+            if let Some((_, display)) = self
+                .0
+                .html_images
+                .borrow()
+                .iter()
+                .find(|(index, _)| *index == image.index)
+                && display.visible()
+            {
+                display.render(context);
+            }
+        }
         context.transform_stack.pop();
 
         context.commands.deactivate_mask();

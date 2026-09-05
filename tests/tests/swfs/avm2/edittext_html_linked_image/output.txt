@@ -1,0 +1,43 @@
+linked instances: true, true
+distinct: true
+stable: true
+names: one, two
+parents: null, null
+dimensions: 40, 20, 30, 10
+text: A B| |
+missing: null
+initialized: true
+control position: true
+hidden: true
+occupied after hide: true
+html retains image: true
+html replacement: null, null
+old instance survives: true
+new instance: true
+natural dimensions: 20, 20
+text replacement: null
+default position: true
+default exclusion: true
+default anchor bounds: null
+default text height excludes image: true
+zero position: true
+zero exclusion: true
+zero anchor bounds: null
+zero text height excludes image: true
+spacing position: true
+spacing exclusion: true
+spacing anchor bounds: null
+spacing text height excludes image: true
+right position: true
+right exclusion: true
+right anchor bounds: null
+right text height excludes image: true
+midtext below line: true
+stacked: 10, 46
+same source new instance: true
+same text removes image: null
+wrap excludes image: true
+wrap below image: true
+scroll keeps reference position: 10, 10
+remove anchor: null
+orphan timeline advances: true

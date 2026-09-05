@@ -1,11 +1,12 @@
 //! Layout box structure
 pub mod context;
 
+use crate::display_object::EditText;
 use crate::drawing::Drawing;
 use crate::font::{DefaultFont, EvalParameters, Font, FontLike, FontSet, FontType};
 use crate::html::dimensions::{BoxBounds, Position, Size};
 use crate::html::layout::context::LayoutContext;
-use crate::html::text_format::{FormatSpans, TextFormat, TextSpan};
+use crate::html::text_format::{FormatSpans, HtmlImage, TextFormat, TextSpan};
 use crate::html::wrap_line;
 use crate::string::WStr;
 use crate::tag_utils::SwfMovie;
@@ -100,6 +101,8 @@ pub struct LayoutBuilder<'a, 'gc> {
 
     /// The total width of the text field being laid out.
     max_bounds: Twips,
+
+    images: Vec<LayoutImage>,
 }
 
 impl<'a, 'gc> LayoutBuilder<'a, 'gc> {
@@ -132,13 +135,74 @@ impl<'a, 'gc> LayoutBuilder<'a, 'gc> {
             is_input,
             is_word_wrap,
             font_type,
+            images: Vec::new(),
         }
     }
 
     fn lay_out_spans(&mut self, context: &mut dyn LayoutContext<'gc>, fs: &'a FormatSpans) {
         for (span_start, _end, span_text, span) in fs.iter_spans() {
-            self.lay_out_span(context, span_start, span_text, span);
+            if let Some(image) = &span.image {
+                self.lay_out_image(context, span_start, span, image);
+            } else {
+                self.lay_out_span(context, span_start, span_text, span);
+            }
         }
+    }
+
+    fn lay_out_image(
+        &mut self,
+        context: &mut dyn LayoutContext<'gc>,
+        start: usize,
+        span: &TextSpan,
+        image: &HtmlImage,
+    ) {
+        let at_line_start = self.cursor.x() == Twips::ZERO;
+        self.font_set = Some(self.resolve_font(context, span));
+        self.newspan(span);
+        let width = Twips::from_pixels(image.width.unwrap_or(image.intrinsic_width));
+        let height = Twips::from_pixels(image.height.unwrap_or(image.intrinsic_height));
+        // Flash defaults to an eight-pixel margin on each side of an image.
+        let hspace = Twips::from_pixels(image.hspace.unwrap_or(8.0));
+        let vspace = Twips::from_pixels(image.vspace.unwrap_or(8.0));
+        let mut top = self.cursor.y();
+        if !at_line_start {
+            top += self.max_ascent + self.max_descent + self.line_leading_adjustment();
+        }
+        if let Some(previous) = self.images.last() {
+            top = top.max(previous.bottom);
+        }
+        let x = if image.right_aligned {
+            // Unlike left placement, right placement includes the right gutter.
+            self.max_bounds + EditText::GUTTER - width - hspace
+        } else {
+            hspace
+        };
+        self.images.push(LayoutImage {
+            index: image.index,
+            position: Position::from((x, top + vspace)),
+            top,
+            bottom: top + height + vspace * 2,
+            occupied_width: width + hspace * 2,
+            right_aligned: image.right_aligned,
+        });
+        // The space anchor has no glyph or character bounds, but still counts
+        // toward text indices. Images do not increase Flash's textHeight.
+        self.append_text_fragment(WStr::empty(), start, start + 1, span);
+    }
+
+    fn image_margins(&self) -> (Twips, Twips) {
+        let mut left = Twips::ZERO;
+        let mut right = Twips::ZERO;
+        for image in &self.images {
+            if self.cursor.y() >= image.top && self.cursor.y() < image.bottom {
+                if image.right_aligned {
+                    right = right.max(image.occupied_width - EditText::GUTTER);
+                } else {
+                    left = left.max(image.occupied_width);
+                }
+            }
+        }
+        (left, right)
     }
 
     fn lay_out_span(
@@ -319,9 +383,11 @@ impl<'a, 'gc> LayoutBuilder<'a, 'gc> {
 
         let mut line_size_bounds = line_size_bounds.unwrap_or_default();
 
+        let (image_left, image_right) = self.image_margins();
         let left_adjustment =
-            Self::left_alignment_offset(&self.current_line_span, self.is_first_line);
-        let right_adjustment = Twips::from_pixels(self.current_line_span.right_margin);
+            Self::left_alignment_offset(&self.current_line_span, self.is_first_line) + image_left;
+        let right_adjustment =
+            Twips::from_pixels(self.current_line_span.right_margin) + image_right;
 
         let misalignment =
             self.max_bounds - left_adjustment - right_adjustment - line_size_bounds.width();
@@ -762,8 +828,10 @@ impl<'a, 'gc> LayoutBuilder<'a, 'gc> {
     ///
     /// Offsets returned by this function should not be considered final;
     fn wrap_dimensions(&self, current_span: &TextSpan) -> (Twips, Twips) {
-        let width = self.max_bounds - Twips::from_pixels(self.current_line_span.right_margin);
-        let offset = Self::left_alignment_offset(current_span, self.is_first_line);
+        let (image_left, image_right) = self.image_margins();
+        let width =
+            self.max_bounds - Twips::from_pixels(self.current_line_span.right_margin) - image_right;
+        let offset = Self::left_alignment_offset(current_span, self.is_first_line) + image_left;
 
         (width, offset + self.cursor.x())
     }
@@ -782,6 +850,7 @@ impl<'a, 'gc> LayoutBuilder<'a, 'gc> {
             bounds: self.bounds.unwrap_or_default(),
             text_size: Size::from((text_size.width(), text_size.height())),
             lines: self.lines,
+            images: self.images,
         }
     }
 
@@ -866,9 +935,26 @@ pub struct Layout<'gc> {
     text_size: Size<Twips>,
 
     lines: Vec<LayoutLine<'gc>>,
+
+    #[collect(require_static)]
+    images: Vec<LayoutImage>,
+}
+
+#[derive(Clone, Debug)]
+pub struct LayoutImage {
+    pub index: usize,
+    pub position: Position<Twips>,
+    top: Twips,
+    bottom: Twips,
+    occupied_width: Twips,
+    right_aligned: bool,
 }
 
 impl<'gc> Layout<'gc> {
+    pub fn images(&self) -> &[LayoutImage] {
+        &self.images
+    }
+
     /// Bounds of this layout, i.e. a union of bounds of all layout boxes.
     pub fn bounds(&self) -> BoxBounds<Twips> {
         self.bounds

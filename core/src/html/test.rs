@@ -868,3 +868,51 @@ fn formatspans_replace_text_degenerate() {
     assert_eq!((0, 1), fs.get_span_boundaries(0, 5));
     assert_eq!((1, 2), fs.get_span_boundaries(5, 9));
 }
+
+#[test]
+fn html_image_preserves_attributes_and_space_anchor() {
+    let spans = FormatSpans::from_html(
+        WStr::from_units(b"<img src='Linked&amp;Image' id='a&amp;&quot;b' width='40' height='20' hspace='3' vspace='4' align='right'>AB"),
+        TextFormat::default(),
+        None,
+        true,
+        false,
+        15,
+    );
+    assert_eq!(spans.text(), WStr::from_units(b" AB"));
+    let image = spans.images().next().unwrap();
+    assert_eq!(image.source, WStr::from_units(b"Linked&Image"));
+    assert_eq!(image.id, WStr::from_units(b"a&\"b"));
+    assert_eq!((image.width, image.height), (Some(40.0), Some(20.0)));
+    assert_eq!((image.hspace, image.vspace), (Some(3.0), Some(4.0)));
+    assert!(image.right_aligned);
+    assert!(spans.to_html().to_utf8_lossy().contains(
+        "<IMG SRC=\"Linked&amp;Image\" WIDTH=\"40\" HEIGHT=\"20\" ID=\"a&amp;&quot;b\" ALIGN=\"right\" VSPACE=\"4\" HSPACE=\"3\"> "
+    ));
+    assert_eq!(spans.iter_spans().next().unwrap().3.font.size, 2.0);
+}
+
+#[test]
+fn html_image_anchor_survives_condense_white_and_formatting() {
+    let mut spans = FormatSpans::from_html(
+        WStr::from_units(b" <img src='Linked' id='one'><img src='Linked' id='two'> text "),
+        TextFormat::default(),
+        None,
+        true,
+        true,
+        15,
+    );
+    assert_eq!(spans.images().count(), 2);
+    spans.set_text_format(
+        0,
+        2,
+        &TextFormat {
+            bold: Some(true),
+            ..Default::default()
+        },
+    );
+    assert_eq!(spans.images().count(), 2);
+    spans.replace_text(0, 1, WStr::empty());
+    assert_eq!(spans.images().count(), 1);
+    assert_eq!(spans.images().next().unwrap().id, WStr::from_units(b"two"));
+}

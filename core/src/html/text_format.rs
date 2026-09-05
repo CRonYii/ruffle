@@ -424,6 +424,22 @@ pub struct TextSpan {
     pub url: WString,
     pub target: WString,
     pub display: TextDisplay,
+    pub image: Option<HtmlImage>,
+}
+
+/// A local HTML image and its one-space anchor in the text spans.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HtmlImage {
+    pub index: usize,
+    pub source: WString,
+    pub id: WString,
+    pub width: Option<f64>,
+    pub height: Option<f64>,
+    pub hspace: Option<f64>,
+    pub vspace: Option<f64>,
+    pub right_aligned: bool,
+    pub intrinsic_width: f64,
+    pub intrinsic_height: f64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -459,6 +475,7 @@ impl Default for TextSpan {
             url: WString::new(),
             target: WString::new(),
             display: TextDisplay::default(),
+            image: None,
         }
     }
 }
@@ -532,7 +549,9 @@ impl TextSpan {
     /// It is assumed that the two text spans being considered are adjacent;
     /// and we have no way of checking, so this function doesn't check that.
     fn can_merge(&self, rhs: &Self) -> bool {
-        self.font == rhs.font
+        self.image.is_none()
+            && rhs.image.is_none()
+            && self.font == rhs.font
             && self.style == rhs.style
             && self.align == rhs.align
             && self.left_margin == rhs.left_margin
@@ -710,6 +729,7 @@ impl FormatSpans {
         let mut format_stack = vec![default_format.clone()];
         let mut text = WString::new();
         let mut spans: Vec<TextSpan> = Vec::new();
+        let mut image_index = 0;
 
         // quick_xml::Reader requires a [u8] slice, but doesn't actually care about Unicode;
         // this means we can pass the raw buffer in the Latin1 case.
@@ -802,6 +822,37 @@ impl FormatSpans {
                     };
                     let mut format = format_stack.last().unwrap().clone();
                     match tag_name {
+                        b"img" => {
+                            if let Some(source) = attribute(b"src") {
+                                let number = |name| {
+                                    attribute(name)
+                                        .and_then(|value| value.parse::<f64>().ok())
+                                        .filter(|value| value.is_finite() && *value >= 0.0)
+                                };
+                                format.size = Some(2.0);
+                                let mut span = TextSpan::with_length_and_format(1, &format);
+                                span.image = Some(HtmlImage {
+                                    index: image_index,
+                                    source: process_html_entity(&source).unwrap_or(source),
+                                    id: attribute(b"id")
+                                        .map(|id| process_html_entity(&id).unwrap_or(id))
+                                        .unwrap_or_default(),
+                                    width: number(b"width"),
+                                    height: number(b"height"),
+                                    hspace: number(b"hspace"),
+                                    vspace: number(b"vspace"),
+                                    right_aligned: attribute(b"align").is_some_and(|value| {
+                                        value.to_ascii_lowercase() == WStr::from_units(b"right")
+                                    }),
+                                    intrinsic_width: 0.0,
+                                    intrinsic_height: 0.0,
+                                });
+                                image_index += 1;
+                                text.push(HTML_SPACE);
+                                spans.push(span);
+                            }
+                            continue;
+                        }
                         b"br" => {
                             if is_multiline {
                                 text.push(HTML_NEWLINE);
@@ -1277,9 +1328,17 @@ impl FormatSpans {
     fn condense_white_swf8(&mut self) {
         let mut removal_start = Some(0);
         let mut to_remove = Vec::new();
+        let mut images = self
+            .iter_spans()
+            .filter_map(|(start, _, _, span)| span.image.as_ref().map(|_| start))
+            .peekable();
         for (i, ch) in self.text().iter().enumerate() {
             let is_newline = ch == HTML_NEWLINE;
-            let is_space = ch == HTML_SPACE;
+            let is_image = images.peek() == Some(&i);
+            if is_image {
+                images.next();
+            }
+            let is_space = ch == HTML_SPACE && !is_image;
 
             // We have to preserve newlines here, as newlines inputted in text
             // are already condensed into space.
@@ -1509,6 +1568,26 @@ impl FormatSpans {
         TextSpanIter::for_format_spans(self)
     }
 
+    pub fn has_images(&self) -> bool {
+        self.spans.iter().any(|span| span.image.is_some())
+    }
+
+    pub fn images(&self) -> impl Iterator<Item = &HtmlImage> {
+        self.spans.iter().filter_map(|span| span.image.as_ref())
+    }
+
+    pub fn set_image_size(&mut self, index: usize, width: f64, height: f64) {
+        if let Some(image) = self
+            .spans
+            .iter_mut()
+            .filter_map(|span| span.image.as_mut())
+            .find(|image| image.index == index)
+        {
+            image.intrinsic_width = width;
+            image.intrinsic_height = height;
+        }
+    }
+
     pub fn to_html(&self) -> WString {
         if self.text.is_empty() {
             return WString::new();
@@ -1525,6 +1604,33 @@ impl FormatSpans {
 
         for (_start, _end, text, span) in spans {
             state.set_span(span);
+            if let Some(image) = &span.image {
+                let escape = |value: &WStr| {
+                    value
+                        .replace(b'&', WStr::from_units(b"&amp;"))
+                        .replace(b'\"', WStr::from_units(b"&quot;"))
+                        .replace(b'<', WStr::from_units(b"&lt;"))
+                        .replace(b'>', WStr::from_units(b"&gt;"))
+                };
+                let _ = write!(state.result, "<IMG SRC=\"{}\"", escape(&image.source));
+                for (name, value) in [("WIDTH", image.width), ("HEIGHT", image.height)] {
+                    if let Some(value) = value {
+                        let _ = write!(state.result, " {name}=\"{value}\"");
+                    }
+                }
+                if !image.id.is_empty() {
+                    let _ = write!(state.result, " ID=\"{}\"", escape(&image.id));
+                }
+                if image.right_aligned {
+                    state.result.push_str(WStr::from_units(b" ALIGN=\"right\""));
+                }
+                for (name, value) in [("VSPACE", image.vspace), ("HSPACE", image.hspace)] {
+                    if let Some(value) = value {
+                        let _ = write!(state.result, " {name}=\"{value}\"");
+                    }
+                }
+                state.result.push_byte(b'>');
+            }
             state.push_text(text);
         }
 
@@ -1585,6 +1691,7 @@ impl<'a> FormatState<'a> {
             || self.current_span.leading != 0.0
             || self.current_span.block_indent != 0.0
             || !self.current_span.tab_stops.is_empty()
+            || (self.current_span.image.is_some() && !self.open_tags.contains(&HtmlTag::P))
         {
             self.open_tag(HtmlTag::Textformat);
         }

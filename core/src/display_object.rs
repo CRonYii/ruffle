@@ -15,7 +15,7 @@ use crate::types::{Degrees, Percent};
 use crate::vminterface::Instantiator;
 use bitflags::bitflags;
 use gc_arena::barrier::{Write, unlock};
-use gc_arena::lock::Lock;
+use gc_arena::lock::{Lock, RefLock};
 use gc_arena::{Collect, Gc, Mutation};
 use ruffle_macros::{enum_trait_object, istr};
 use ruffle_render::perspective_projection::PerspectiveProjection;
@@ -261,6 +261,7 @@ pub enum RenderMask<'gc> {
 pub struct DisplayObjectBase<'gc> {
     cell: RefCell<DisplayObjectBaseMut>,
     parent: Lock<Option<DisplayObject<'gc>>>,
+    html_image_owner: RefLock<HtmlImageOwner<'gc>>,
     place_frame: Cell<u16>,
     depth: Cell<Depth>,
     ratio: Cell<u16>,
@@ -320,6 +321,18 @@ pub struct DisplayObjectBase<'gc> {
     scaling_grid: Cell<Rectangle<Twips>>,
 }
 
+/// HTML images render inside a field while remaining AS-visible orphans.
+#[derive(Default, Collect)]
+#[collect(no_drop)]
+struct HtmlImageOwner<'gc>(Option<EditText<'gc>>);
+
+impl Clone for HtmlImageOwner<'_> {
+    fn clone(&self) -> Self {
+        // A cloned display object does not belong to the original HTML document.
+        Self::default()
+    }
+}
+
 #[derive(Clone)]
 struct DisplayObjectBaseMut {
     filters: Box<[Filter]>,
@@ -340,6 +353,7 @@ impl Default for DisplayObjectBase<'_> {
                 cache: None,
             }),
             parent: Default::default(),
+            html_image_owner: Default::default(),
             place_frame: Default::default(),
             depth: Default::default(),
             ratio: Default::default(),
@@ -721,6 +735,9 @@ impl<'gc> DisplayObjectBase<'gc> {
     fn set_visible(&self, value: bool) -> bool {
         let changed = self.visible() != value;
         self.set_flag(DisplayObjectFlags::VISIBLE, value);
+        if changed && let Some(owner) = self.html_image_owner.borrow().0 {
+            owner.invalidate_cached_bitmap();
+        }
         changed
     }
 
@@ -2810,7 +2827,21 @@ pub trait TDisplayObject<'gc>:
             if let Some(parent) = self.parent() {
                 parent.invalidate_cached_bitmap();
             }
+            if let Some(owner) = self.base().html_image_owner.borrow().0 {
+                owner.invalidate_cached_bitmap();
+            }
         }
+    }
+
+    #[no_dynamic]
+    fn set_html_image_owner(self, gc: &Mutation<'gc>, owner: Option<EditText<'gc>>) {
+        unlock!(
+            Gc::write(gc, self.base()),
+            DisplayObjectBase,
+            html_image_owner
+        )
+        .borrow_mut()
+        .0 = owner;
     }
 
     /// Retrieve a named property from the AVM1 object.

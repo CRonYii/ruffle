@@ -8,7 +8,7 @@ use crate::avm2::object::{ClassObject, Object, TextFormatObject};
 use crate::avm2::parameters::ParametersExt;
 use crate::avm2::value::Value;
 use crate::avm2::{ArrayObject, ArrayStorage, Error};
-use crate::display_object::{AutoSizeMode, EditText, TextSelection};
+use crate::display_object::{AutoSizeMode, EditText, TDisplayObject, TextSelection};
 use crate::html::TextFormat;
 use crate::string::AvmString;
 use crate::{avm2_stub_getter, avm2_stub_setter};
@@ -439,9 +439,29 @@ pub fn set_html_text<'gc>(
 
         this.set_is_html(true);
         this.set_html_text(&html_text, activation.context);
+        this.instantiate_html_images(activation)?;
     }
 
     Ok(Value::Undefined)
+}
+
+pub fn get_image_reference<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    this: Value<'gc>,
+    args: FunctionArgs<'_, 'gc>,
+) -> Result<Value<'gc>, Error<'gc>> {
+    let id = args.get_string(activation, 0);
+    let this = this.as_object().unwrap();
+    if let Some(field) = this
+        .as_display_object()
+        .and_then(|object| object.as_edit_text())
+    {
+        return Ok(field
+            .image_reference(&id)
+            .map(|image| image.object2_or_null())
+            .unwrap_or(Value::Null));
+    }
+    Ok(Value::Null)
 }
 
 pub fn get_length<'gc>(
