@@ -15,6 +15,7 @@ use ruffle_core::events::{GamepadButton, KeyCode};
 use ruffle_core::font::DefaultFont;
 use ruffle_core::{LoadBehavior, Player, PlayerBuilder, PlayerEvent};
 use ruffle_frontend_utils::backends::audio::CpalAudioBackend;
+use ruffle_frontend_utils::backends::navigator::capture::CaptureHandle;
 use ruffle_frontend_utils::backends::navigator::{ExternalNavigatorBackend, FutureSpawner};
 use ruffle_frontend_utils::bundle::source::BundleSourceError;
 use ruffle_frontend_utils::bundle::{Bundle, BundleError};
@@ -127,6 +128,7 @@ impl ActivePlayer {
         font_database: Rc<fontdb::Database>,
         preferences: GlobalPreferences,
         file_picker: FilePicker,
+        network_capture: Option<CaptureHandle>,
     ) -> Self {
         let player_id = PlayerId::new();
         let mut builder = PlayerBuilder::new();
@@ -229,7 +231,8 @@ impl ActivePlayer {
                 initial_allow_list,
                 opt.filesystem_access_mode,
             ),
-        );
+        )
+        .with_network_capture(network_capture);
 
         if cfg!(feature = "external_video") && preferences.openh264_enabled() {
             #[cfg(feature = "external_video")]
@@ -433,6 +436,7 @@ pub struct PlayerController {
     font_database: Rc<fontdb::Database>,
     preferences: GlobalPreferences,
     file_picker: FilePicker,
+    network_capture: Option<CaptureHandle>,
 }
 
 impl PlayerController {
@@ -443,6 +447,7 @@ impl PlayerController {
         font_database: fontdb::Database,
         preferences: GlobalPreferences,
         file_picker: FilePicker,
+        network_capture: Option<CaptureHandle>,
     ) -> Self {
         Self {
             player: None,
@@ -452,6 +457,7 @@ impl PlayerController {
             font_database: Rc::new(font_database),
             preferences,
             file_picker,
+            network_capture,
         }
     }
 
@@ -471,6 +477,7 @@ impl PlayerController {
             self.font_database.clone(),
             self.preferences.clone(),
             self.file_picker.clone(),
+            self.network_capture.clone(),
         ));
     }
 

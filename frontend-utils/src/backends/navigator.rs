@@ -1,4 +1,7 @@
+pub mod capture;
 mod fetch;
+
+use capture::CaptureHandle;
 
 use crate::backends::navigator::fetch::{Response, ResponseBody};
 use crate::content::PlayingContent;
@@ -64,6 +67,8 @@ pub struct ExternalNavigatorBackend<F: FutureSpawner<Error>, I: NavigatorInterfa
     content: Rc<PlayingContent>,
 
     interface: I,
+
+    capture: Option<CaptureHandle>,
 }
 
 fn cookie_origin_url(base_url: &Url) -> Url {
@@ -75,6 +80,12 @@ fn cookie_origin_url(base_url: &Url) -> Url {
 }
 
 impl<F: FutureSpawner<Error>, I: NavigatorInterface> ExternalNavigatorBackend<F, I> {
+    /// Attach an application-owned passive recorder. None creates no capture sinks.
+    pub fn with_network_capture(mut self, capture: Option<CaptureHandle>) -> Self {
+        self.capture = capture;
+        self
+    }
+
     /// Construct a navigator backend with fetch and async capability.
     #[expect(clippy::too_many_arguments)]
     pub fn new(
@@ -138,6 +149,7 @@ impl<F: FutureSpawner<Error>, I: NavigatorInterface> ExternalNavigatorBackend<F,
             socket_mode,
             content,
             interface,
+            capture: None,
         }
     }
 }
@@ -203,6 +215,7 @@ impl<F: FutureSpawner<Error> + 'static, I: NavigatorInterface> NavigatorBackend
         };
 
         let client = self.client.clone();
+        let capture = self.capture.clone();
 
         match processed_url.scheme() {
             "file" => {
@@ -225,22 +238,34 @@ impl<F: FutureSpawner<Error> + 'static, I: NavigatorInterface> NavigatorBackend
                         text_encoding: None,
                         status: 0,
                         redirected: false,
+                        capture: None,
                     });
 
                     Ok(response)
                 })
             }
             _ => Box::pin(async move {
-                let client = client.ok_or_else(|| ErrorResponse {
-                    url: processed_url.to_string(),
-                    error: Error::FetchError("Network unavailable".to_string()),
+                let (body_data, mime) = request.body().clone().unwrap_or_default();
+                let capture = capture.map(|capture| {
+                    capture.http(
+                        matches!(request.method(), NavigationMethod::Post),
+                        &body_data,
+                    )
+                });
+                let client = client.ok_or_else(|| {
+                    if let Some(capture) = &capture {
+                        capture.finish("http_network_unavailable");
+                    }
+                    ErrorResponse {
+                        url: processed_url.to_string(),
+                        error: Error::FetchError("Network unavailable".to_string()),
+                    }
                 })?;
 
                 let mut request_builder = match request.method() {
                     NavigationMethod::Get => client.get(processed_url.clone()),
                     NavigationMethod::Post => client.post(processed_url.clone()),
                 };
-                let (body_data, mime) = request.body().clone().unwrap_or_default();
                 for (name, val) in request.headers().iter() {
                     request_builder = request_builder.header(name, val);
                 }
@@ -249,6 +274,9 @@ impl<F: FutureSpawner<Error> + 'static, I: NavigatorInterface> NavigatorBackend
                 request_builder = request_builder.body(body_data);
 
                 let response = spawn_tokio(request_builder.send()).await.map_err(|e| {
+                    if let Some(capture) = &capture {
+                        capture.finish("http_request_error");
+                    }
                     let inner = if e.is_connect() {
                         Error::InvalidDomain(processed_url.to_string())
                     } else {
@@ -267,8 +295,14 @@ impl<F: FutureSpawner<Error> + 'static, I: NavigatorInterface> NavigatorBackend
                     .and_then(|content_type| content_type.to_str().ok())
                     .and_then(get_encoding);
                 let status = response.status().as_u16();
+                if let Some(capture) = &capture {
+                    capture.response(status);
+                }
                 let redirected = *response.url() != processed_url;
                 if !response.status().is_success() {
+                    if let Some(capture) = &capture {
+                        capture.finish("http_error_body_unconsumed");
+                    }
                     let error = Error::HttpNotOk(
                         format!("Got {}", response.status()),
                         status,
@@ -284,6 +318,7 @@ impl<F: FutureSpawner<Error> + 'static, I: NavigatorInterface> NavigatorBackend
                     text_encoding,
                     status,
                     redirected,
+                    capture,
                 });
                 Ok(response)
             }),
@@ -333,11 +368,15 @@ impl<F: FutureSpawner<Error> + 'static, I: NavigatorInterface> NavigatorBackend
         let is_allowed = self.socket_allowed.contains(&addr);
         let socket_mode = self.socket_mode;
         let interface = self.interface.clone();
+        let capture = self.capture.as_ref().map(CaptureHandle::socket);
 
         let future = Box::pin(async move {
             match (is_allowed, socket_mode) {
                 (false, SocketMode::Allow) | (true, _) => {} // the process is allowed to continue. just dont do anything.
                 (false, SocketMode::Deny) => {
+                    if let Some(capture) = &capture {
+                        capture.event("socket_denied");
+                    }
                     // Just fail the connection.
                     let action = SocketAction::Connect(handle, ConnectionState::Failed);
                     let _ = send_action(&sender, action).await;
@@ -352,6 +391,9 @@ impl<F: FutureSpawner<Error> + 'static, I: NavigatorInterface> NavigatorBackend
                     let attempt_sandbox_connect = interface.confirm_socket(&host, port).await;
 
                     if !attempt_sandbox_connect {
+                        if let Some(capture) = &capture {
+                            capture.event("socket_denied");
+                        }
                         // fail the connection.
                         let action = SocketAction::Connect(handle, ConnectionState::Failed);
                         let _ = send_action(&sender, action).await;
@@ -369,12 +411,18 @@ impl<F: FutureSpawner<Error> + 'static, I: NavigatorInterface> NavigatorBackend
 
             let mut stream = match TcpStream::connect((host, port)).or(timeout).await {
                 Err(e) if e.kind() == ErrorKind::TimedOut => {
+                    if let Some(capture) = &capture {
+                        capture.event("socket_connect_timeout");
+                    }
                     warn!("Connection to {}:{} timed out", host2, port);
                     let action = SocketAction::Connect(handle, ConnectionState::TimedOut);
                     let _ = send_action(&sender, action).await;
                     return;
                 }
                 Ok(stream) => {
+                    if let Some(capture) = &capture {
+                        capture.event("socket_connected");
+                    }
                     let action = SocketAction::Connect(handle, ConnectionState::Connected);
                     if !send_action(&sender, action).await {
                         return;
@@ -382,6 +430,9 @@ impl<F: FutureSpawner<Error> + 'static, I: NavigatorInterface> NavigatorBackend
                     stream
                 }
                 Err(err) => {
+                    if let Some(capture) = &capture {
+                        capture.event("socket_connect_error");
+                    }
                     warn!("Failed to connect to {}:{}, error: {}", host2, port, err);
                     let action = SocketAction::Connect(handle, ConnectionState::Failed);
                     let _ = send_action(&sender, action).await;
@@ -394,17 +445,29 @@ impl<F: FutureSpawner<Error> + 'static, I: NavigatorInterface> NavigatorBackend
             let sender2 = sender.clone();
             let (mut read, mut write) = stream.split();
 
+            let read_capture = capture.clone();
+            let write_capture = capture.clone();
             let read = async move {
                 loop {
                     let mut buffer = [0; 4096];
 
                     match read.read(&mut buffer).await {
                         Err(e) if e.kind() == ErrorKind::TimedOut => {} // try again later.
-                        Err(_) | Ok(0) => {
+                        result @ (Err(_) | Ok(0)) => {
+                            if let Some(capture) = &read_capture {
+                                capture.event(if result.is_ok() {
+                                    "socket_server_eof"
+                                } else {
+                                    "socket_read_error"
+                                });
+                            }
                             let _ = send_action(&sender, SocketAction::Close(handle)).await;
                             break;
                         }
                         Ok(read) => {
+                            if let Some(capture) = &read_capture {
+                                capture.bytes(false, &buffer[..read]);
+                            }
                             let buffer = buffer.into_iter().take(read).collect::<Vec<_>>();
 
                             let action = SocketAction::Data(handle, buffer);
@@ -439,14 +502,23 @@ impl<F: FutureSpawner<Error> + 'static, I: NavigatorInterface> NavigatorBackend
                         match write.write(&pending_write).await {
                             Err(e) if e.kind() == ErrorKind::TimedOut => {} // try again later.
                             Err(_) => {
+                                if let Some(capture) = &write_capture {
+                                    capture.event("socket_write_error");
+                                }
                                 let _ = send_action(&sender2, SocketAction::Close(handle)).await;
                                 return;
                             }
                             Ok(written) => {
+                                if let Some(capture) = &write_capture {
+                                    capture.bytes(true, &pending_write[..written]);
+                                }
                                 let _ = pending_write.drain(..written);
                             }
                         }
                     } else if close_connection {
+                        if let Some(capture) = &write_capture {
+                            capture.event("socket_client_queue_closed");
+                        }
                         return;
                     } else {
                         // Receiver is empty and there's no pending data,
@@ -800,5 +872,174 @@ mod tests {
         client_write.close();
 
         assert_eq!(read_server(&mut server_socket).await, "Sending some data");
+    }
+    /// A single synthetic HTTP response; never contacts an external service.
+    #[cfg(unix)]
+    async fn capture_http_fixture(response: &'static [u8]) -> (String, task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!(
+            "http://fixture-user:fixture-password@{}/path?token=fixture-query",
+            listener.local_addr().unwrap()
+        );
+        let server = task::spawn_local(async move {
+            let (mut socket, _) = listener.accept().or(async_timeout!()).await.unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let n = socket.read(&mut buffer).or(async_timeout!()).await.unwrap();
+                assert_ne!(n, 0);
+                request.extend_from_slice(&buffer[..n]);
+            }
+            socket
+                .write_all(response)
+                .or(async_timeout!())
+                .await
+                .unwrap();
+        });
+        (url, server)
+    }
+
+    #[cfg(unix)]
+    #[macro_rules_attribute::apply(async_test)]
+    async fn test_http_capture_consumption_errors_redaction_and_off() {
+        use capture::NetworkCapture;
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("network");
+        let mut backend = new_test_backend(true);
+        assert!(backend.capture.is_none());
+        let (url, server) =
+            capture_http_fixture(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\noff").await;
+        assert_eq!(
+            backend
+                .fetch(Request::get(url))
+                .await
+                .ok()
+                .unwrap()
+                .body()
+                .await
+                .unwrap(),
+            b"off"
+        );
+        server.await.unwrap();
+        assert!(!dir.exists());
+
+        let recording = NetworkCapture::new(&dir, 100_000).unwrap();
+        backend = backend.with_network_capture(Some(recording.handle()));
+        let (url, server) = capture_http_fixture(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nSet-Cookie: fixture-response-cookie\r\n\r\nreply").await;
+        let mut request = Request::post(
+            url,
+            Some((b"fixture-request-body".to_vec(), "text/plain".into())),
+        );
+        request.set_headers(IndexMap::from_iter([
+            ("Cookie".into(), "fixture-cookie".into()),
+            ("Authorization".into(), "fixture-auth".into()),
+        ]));
+        let response = backend.fetch(request).await.ok().unwrap();
+        assert_eq!(response.body().await.unwrap(), b"reply");
+        server.await.unwrap();
+
+        let (url, server) =
+            capture_http_fixture(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nfirst").await;
+        let mut response = backend.fetch(Request::get(url)).await.ok().unwrap();
+        assert_eq!(response.next_chunk().await.unwrap().unwrap(), b"first");
+        // Unread remainder, not an EOF. The recorder must not consume it eagerly.
+        drop(response);
+        server.await.unwrap();
+
+        let (url, server) =
+            capture_http_fixture(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 6\r\n\r\ndenied")
+                .await;
+        assert!(backend.fetch(Request::get(url)).await.is_err());
+        server.await.unwrap();
+
+        let (url, server) =
+            capture_http_fixture(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nshort").await;
+        assert!(
+            backend
+                .fetch(Request::get(url))
+                .await
+                .ok()
+                .unwrap()
+                .body()
+                .await
+                .is_err()
+        );
+        server.await.unwrap();
+        drop(recording);
+
+        assert_eq!(
+            std::fs::read(dir.join("http/1.request.bin")).unwrap(),
+            b"fixture-request-body"
+        );
+        assert_eq!(
+            std::fs::read(dir.join("http/1.response.bin")).unwrap(),
+            b"reply"
+        );
+        assert_eq!(
+            std::fs::read(dir.join("http/2.response.bin")).unwrap(),
+            b"first"
+        );
+        assert!(!dir.join("http/3.response.bin").exists());
+        assert_eq!(
+            std::fs::read(dir.join("http/4.response.bin")).unwrap(),
+            b"short"
+        );
+        let index = std::fs::read_to_string(dir.join("network-index.jsonl")).unwrap();
+        assert!(!index.contains("fixture-"));
+        assert!(!index.contains("Cookie"));
+        assert!(!index.contains("Authorization"));
+        assert!(index.contains("http_response_eof"));
+        assert!(index.contains("http_cancelled_or_unconsumed"));
+        assert!(index.contains("http_error_body_unconsumed"));
+        assert!(index.contains("http_body_error"));
+        assert!(index.contains("\"value\":403"));
+    }
+
+    #[cfg(unix)]
+    #[macro_rules_attribute::apply(async_test)]
+    async fn test_socket_capture_bytes_and_quota_do_not_change_traffic() {
+        use capture::NetworkCapture;
+        for budget in [100_000, 1] {
+            let temp = tempfile::tempdir().unwrap();
+            let dir = temp.path().join("network");
+            let recording = NetworkCapture::new(&dir, budget).unwrap();
+            let mut backend = new_test_backend(true).with_network_capture(Some(recording.handle()));
+            let (accept, addr) = start_test_server().await;
+            let (write, receiver) = async_channel::unbounded();
+            let (sender, read) = async_channel::unbounded();
+            backend.connect_socket(
+                addr.ip().to_string(),
+                addr.port(),
+                TIMEOUT,
+                dummy_handle!(),
+                receiver,
+                sender,
+            );
+            let mut server = accept.await.unwrap();
+            assert_next_socket_actions!(read; Connect(dummy_handle!(), ConnectionState::Connected),);
+            write_client(&write, "one").await;
+            assert_eq!(read_server(&mut server).await, "one");
+            write_client(&write, "two").await;
+            assert_eq!(read_server(&mut server).await, "two");
+            write_server(&mut server, "reply").await;
+            assert_next_socket_actions!(read; Data(dummy_handle!(), b"reply".to_vec()),);
+            server.shutdown().await.unwrap();
+            assert_next_socket_actions!(read; Close(dummy_handle!()),);
+            drop(recording);
+            if budget > 1 {
+                assert_eq!(
+                    std::fs::read(dir.join("connections/1.client.bin")).unwrap(),
+                    b"onetwo"
+                );
+                assert_eq!(
+                    std::fs::read(dir.join("connections/1.server.bin")).unwrap(),
+                    b"reply"
+                );
+                let index = std::fs::read_to_string(dir.join("network-index.jsonl")).unwrap();
+                assert!(index.contains("socket_server_eof"));
+            } else {
+                assert!(dir.join("capture.partial-quota").exists());
+            }
+        }
     }
 }

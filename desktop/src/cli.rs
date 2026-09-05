@@ -218,6 +218,14 @@ pub struct Opt {
     #[clap(long)]
     pub no_gui: bool,
 
+    /// Record sensitive application-level network bodies to a NEW private directory (Unix only).
+    #[clap(long)]
+    pub network_capture_directory: Option<std::path::PathBuf>,
+
+    /// Total network capture file byte budget, including the JSONL index.
+    #[clap(long, default_value = "268435456")]
+    pub network_capture_max_bytes: std::num::NonZeroU64,
+
     /// Directory in which to periodically capture the rendered movie as JPEG files.
     #[clap(long)]
     pub screenshot_directory: Option<std::path::PathBuf>,

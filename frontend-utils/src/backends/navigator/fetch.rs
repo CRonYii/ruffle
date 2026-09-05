@@ -1,3 +1,4 @@
+use super::capture::HttpCapture;
 use reqwest::Response as ReqwestResponse;
 use ruffle_core::backend::navigator::{OwnedFuture, SuccessResponse};
 use ruffle_core::loader::Error;
@@ -22,6 +23,7 @@ pub struct Response {
     pub text_encoding: Option<&'static Encoding>,
     pub status: u16,
     pub redirected: bool,
+    pub capture: Option<Arc<HttpCapture>>,
 }
 
 impl SuccessResponse for Response {
@@ -33,18 +35,40 @@ impl SuccessResponse for Response {
         self.url = url;
     }
 
-    #[expect(clippy::await_holding_lock)]
     fn body(self: Box<Self>) -> OwnedFuture<Vec<u8>, Error> {
+        let capture = self.capture;
         match self.response_body {
             ResponseBody::File(file) => {
                 Box::pin(async move { file.map_err(|e| Error::FetchError(e.to_string())) })
             }
             ResponseBody::Network(response) => Box::pin(async move {
-                Ok(response
+                let mut response = response
                     .lock()
                     .expect("working lock during fetch body read")
                     .take()
-                    .expect("Body cannot already be consumed")
+                    .expect("Body cannot already be consumed");
+                if let Some(capture) = capture {
+                    // Preserve on-demand consumption while retaining bytes received before
+                    // an error or cancellation; bytes() would discard that evidence.
+                    let mut body = Vec::new();
+                    loop {
+                        match response.chunk().await {
+                            Ok(Some(bytes)) => {
+                                capture.bytes(&bytes);
+                                body.extend_from_slice(&bytes);
+                            }
+                            Ok(None) => {
+                                capture.finish("http_response_eof");
+                                return Ok(body);
+                            }
+                            Err(e) => {
+                                capture.finish("http_body_error");
+                                return Err(Error::FetchError(e.to_string()));
+                            }
+                        }
+                    }
+                }
+                Ok(response
                     .bytes()
                     .await
                     .map_err(|e| Error::FetchError(e.to_string()))?
@@ -67,6 +91,7 @@ impl SuccessResponse for Response {
 
     #[expect(clippy::await_holding_lock)]
     fn next_chunk(&mut self) -> OwnedFuture<Option<Vec<u8>>, Error> {
+        let capture = self.capture.clone();
         match &mut self.response_body {
             ResponseBody::File(file) => {
                 let res = file
@@ -101,9 +126,24 @@ impl SuccessResponse for Response {
                         .await;
 
                     match result {
-                        Ok(Some(bytes)) => Ok(Some(bytes.to_vec())),
-                        Ok(None) => Ok(None),
-                        Err(e) => Err(Error::FetchError(e.to_string())),
+                        Ok(Some(bytes)) => {
+                            if let Some(capture) = &capture {
+                                capture.bytes(&bytes);
+                            }
+                            Ok(Some(bytes.to_vec()))
+                        }
+                        Ok(None) => {
+                            if let Some(capture) = &capture {
+                                capture.finish("http_response_eof");
+                            }
+                            Ok(None)
+                        }
+                        Err(e) => {
+                            if let Some(capture) = &capture {
+                                capture.finish("http_body_error");
+                            }
+                            Err(Error::FetchError(e.to_string()))
+                        }
                     }
                 })
             }

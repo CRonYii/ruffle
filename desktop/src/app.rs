@@ -12,6 +12,7 @@ use ruffle_core::FloatDuration;
 use ruffle_core::PlayerEvent;
 use ruffle_core::events::{ImeEvent, ImeNotification, PlayerNotification};
 use ruffle_core::swf::HeaderExt;
+use ruffle_frontend_utils::backends::navigator::capture::NetworkCapture;
 use ruffle_frontend_utils::content::ContentDescriptor;
 use ruffle_render::backend::ViewportDimensions;
 use std::sync::Arc;
@@ -420,6 +421,7 @@ pub struct App {
     event_loop_proxy: EventLoopProxy<RuffleEvent>,
     preferences: GlobalPreferences,
     font_database: fontdb::Database,
+    network_capture: Option<NetworkCapture>,
 }
 
 /// Enters the tokio runtime context.
@@ -432,6 +434,14 @@ macro_rules! enter_runtime {
 
 impl App {
     pub fn new(preferences: GlobalPreferences) -> Result<(Self, EventLoop<RuffleEvent>), Error> {
+        let network_capture = preferences
+            .cli
+            .network_capture_directory
+            .as_ref()
+            .map(|directory| {
+                NetworkCapture::new(directory, preferences.cli.network_capture_max_bytes.get())
+            })
+            .transpose()?;
         let event_loop = EventLoop::with_user_event().build()?;
 
         let mut font_database = fontdb::Database::default();
@@ -447,6 +457,7 @@ impl App {
 
         Ok((
             Self {
+                network_capture,
                 main_window: None,
                 runtime: Some(runtime),
                 gilrs,
@@ -528,6 +539,7 @@ impl ApplicationHandler<RuffleEvent> for App {
                 font_database,
                 preferences.clone(),
                 gui.file_picker(),
+                self.network_capture.as_ref().map(NetworkCapture::handle),
             );
 
             if let Some(movie_url) = &movie_url {
@@ -727,6 +739,8 @@ impl ApplicationHandler<RuffleEvent> for App {
         if let Some(runtime) = self.runtime.take() {
             runtime.shutdown_timeout(std::time::Duration::from_secs(1));
         }
+        // Producers are cancelled; drain and join the session-owned recorder.
+        drop(self.network_capture.take());
     }
 }
 
