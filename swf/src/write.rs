@@ -2868,6 +2868,25 @@ mod tests {
     }
 
     #[test]
+    fn glow_strength_wire_round_trip() {
+        use crate::read::Reader;
+
+        for raw in [0x0000u16, 0x0100, 0x7fff, 0x8000, 0xff00, 0xffff] {
+            let mut bytes = vec![2, 0, 0, 0, 255, 0, 0, 3, 0, 0, 0, 3, 0];
+            bytes.extend_from_slice(&raw.to_le_bytes());
+            bytes.push(0x21);
+            let filter = Reader::new(&bytes, 10).read_filter().unwrap();
+            let Filter::GlowFilter(ref glow) = filter else {
+                panic!("expected a glow filter");
+            };
+            assert_eq!(glow.strength(), f64::from(raw) / 256.0);
+            let mut written = Vec::new();
+            Writer::new(&mut written, 10).write_filter(&filter).unwrap();
+            assert_eq!(written, bytes);
+        }
+    }
+
+    #[test]
     fn write_bevel_filter() {
         use crate::read::Reader;
 

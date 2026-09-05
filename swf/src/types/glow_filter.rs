@@ -6,11 +6,21 @@ pub struct GlowFilter {
     pub color: Color,
     pub blur_x: Fixed16,
     pub blur_y: Fixed16,
+    /// Raw unsigned 8.8 bits, retained in `Fixed8` for SWF read/write compatibility.
+    /// Use `strength()` and `set_strength()` for numeric conversions.
     pub strength: Fixed8,
     pub flags: GlowFilterFlags,
 }
 
 impl GlowFilter {
+    pub fn strength(&self) -> f64 {
+        f64::from(self.strength.get() as u16) / 256.0
+    }
+
+    pub fn set_strength(&mut self, strength: f64) {
+        self.strength = Fixed8::from_bits((strength * 256.0) as u16 as i16);
+    }
+
     #[inline]
     pub fn is_inner(&self) -> bool {
         self.flags.contains(GlowFilterFlags::INNER_GLOW)
@@ -66,5 +76,33 @@ impl GlowFilterFlags {
         let flags = Self::from_bits_retain(num_passes);
         debug_assert_eq!(flags & Self::PASSES, flags);
         flags
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unsigned_strength_round_trip() {
+        for (raw, expected) in [
+            (0x0000u16, 0.0),
+            (0x0100, 1.0),
+            (0x7fff, 127.99609375),
+            (0x8000, 128.0),
+            (0xff00, 255.0),
+            (0xffff, 255.99609375),
+        ] {
+            let mut filter = GlowFilter {
+                color: Color::BLACK,
+                blur_x: Fixed16::from_f32(3.0),
+                blur_y: Fixed16::from_f32(3.0),
+                strength: Fixed8::from_bits(raw as i16),
+                flags: GlowFilterFlags::COMPOSITE_SOURCE | GlowFilterFlags::from_passes(1),
+            };
+            assert_eq!(filter.strength(), expected, "raw strength {raw:04x}");
+            filter.set_strength(expected);
+            assert_eq!(filter.strength.get() as u16, raw);
+        }
     }
 }

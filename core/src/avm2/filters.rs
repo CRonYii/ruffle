@@ -656,13 +656,15 @@ fn avm2_to_glow_filter<'gc>(
     flags.set(GlowFilterFlags::INNER_GLOW, inner);
     flags.set(GlowFilterFlags::KNOCKOUT, knockout);
     flags |= GlowFilterFlags::from_passes(quality.clamp(0, 15) as u8);
-    Ok(Filter::GlowFilter(GlowFilter {
+    let mut filter = GlowFilter {
         color: Color::from_rgb(color, (alpha * 255.0) as u8),
         blur_x: Fixed16::from_f64(blur_x.max(0.0)),
         blur_y: Fixed16::from_f64(blur_y.max(0.0)),
-        strength: Fixed8::from_f64(strength.clamp(0.0, 255.0)),
+        strength: Fixed8::ZERO,
         flags,
-    }))
+    };
+    filter.set_strength(strength.clamp(0.0, 255.0));
+    Ok(Filter::GlowFilter(filter))
 }
 
 fn glow_filter_to_avm2<'gc>(
@@ -676,7 +678,7 @@ fn glow_filter_to_avm2<'gc>(
             (f64::from(filter.color.a) / 255.0).into(),
             filter.blur_x.to_f64().into(),
             filter.blur_y.to_f64().into(),
-            filter.strength.to_f64().into(),
+            filter.strength().into(),
             filter.num_passes().into(),
             filter.is_inner().into(),
             filter.is_knockout().into(),

@@ -55,7 +55,7 @@ impl From<&GlowFilterData> for swf::GlowFilter {
             color: filter.color.get(),
             blur_x: Fixed16::from_f64(filter.blur_x.get()),
             blur_y: Fixed16::from_f64(filter.blur_y.get()),
-            strength: Fixed8::from_f64(filter.strength()),
+            strength: Fixed8::from_bits(filter.strength.get() as i16),
             flags,
         }
     }
@@ -68,7 +68,7 @@ impl From<swf::GlowFilter> for GlowFilterData {
         Self {
             color: Cell::new(filter.color),
             quality: Cell::new(filter.num_passes().into()),
-            strength: Cell::new((filter.strength.to_f64() * 256.0) as u16),
+            strength: Cell::new(filter.strength.get() as u16),
             knockout: Cell::new(knockout),
             blur_x: Cell::new(filter.blur_x.into()),
             blur_y: Cell::new(filter.blur_y.into()),

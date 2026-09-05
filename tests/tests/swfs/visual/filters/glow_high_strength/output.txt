@@ -1,0 +1,3 @@
+1 source=true halo=true outside=true
+128 source=true halo=true outside=true
+255 source=true halo=true outside=true

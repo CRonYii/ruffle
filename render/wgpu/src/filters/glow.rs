@@ -204,7 +204,7 @@ impl GlowFilter {
                     f32::from(filter.color.b) / 255.0,
                     f32::from(filter.color.a) / 255.0,
                 ],
-                strength: filter.strength.to_f32(),
+                strength: filter.strength() as f32,
                 inner: if filter.is_inner() { 1 } else { 0 },
                 knockout: if filter.is_knockout() { 1 } else { 0 },
                 composite_source: if filter.composite_source() { 1 } else { 0 },
