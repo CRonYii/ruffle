@@ -1,0 +1,4 @@
+mouseDown target=city
+click target=city
+mouseDown target=background
+click target=background

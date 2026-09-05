@@ -3209,6 +3209,19 @@ impl<'gc> TInteractiveObject<'gc> for MovieClip<'gc> {
                     Avm2MousePick::Miss
                 };
 
+                // A custom hit area replaces the child's target region, not its
+                // contribution to an ordinary parent's geometry. Defer this hit
+                // so other interactive children still take priority.
+                if matches!(res, Avm2MousePick::Miss)
+                    && custom_hit_area.is_none()
+                    && child
+                        .as_movie_clip()
+                        .is_some_and(|clip| clip.hit_area().is_some())
+                    && child.hit_test_shape(context, point, options)
+                {
+                    res = Avm2MousePick::PropagateToParent;
+                }
+
                 while let Some((clip, clip_range)) = clip_layers.peek() {
                     // This clip layer no longer applies to the remaining children (which all have lower depth values).
                     // This is a rare case where we actually use 'child.depth()' in AVM2 - child.depth()
