@@ -39,6 +39,7 @@ struct MainWindow {
     preferred_width: Option<f64>,
     preferred_height: Option<f64>,
     start_fullscreen: bool,
+    start_maximized: bool,
     loaded: LoadingState,
     time: Instant,
     next_frame_time: Option<Instant>,
@@ -276,7 +277,7 @@ impl MainWindow {
 
         // To prevent issues like waiting on resize indefinitely (#11364) or desyncing the window state on Windows,
         // do not resize while window is maximized.
-        let should_resize = !self.gui.window().is_maximized();
+        let should_resize = !self.start_maximized && !self.gui.window().is_maximized();
 
         let (viewport_size, state) = if should_resize {
             let movie_width = swf_header.stage_size().width().to_pixels();
@@ -352,6 +353,9 @@ impl MainWindow {
             None
         });
         self.gui.window().set_visible(true);
+        if self.start_maximized && !self.start_fullscreen {
+            self.gui.window().set_maximized(true);
+        }
 
         let viewport_scale_factor = self.gui.window().scale_factor();
         if let Some(mut player) = self.player.get() {
@@ -475,6 +479,7 @@ impl ApplicationHandler<RuffleEvent> for App {
             let preferred_width = self.preferences.cli.width;
             let preferred_height = self.preferences.cli.height;
             let start_fullscreen = self.preferences.cli.fullscreen;
+            let start_maximized = self.preferences.cli.maximized;
 
             #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
             let mut window_attributes = WindowAttributes::default()
@@ -556,6 +561,7 @@ impl ApplicationHandler<RuffleEvent> for App {
                 preferred_width,
                 preferred_height,
                 start_fullscreen,
+                start_maximized,
                 loaded,
                 minimized: false,
                 occluded: false,

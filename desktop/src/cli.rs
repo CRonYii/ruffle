@@ -156,6 +156,10 @@ pub struct Opt {
     #[clap(long, action)]
     pub upgrade_to_https: bool,
 
+    /// Start application with a maximized window.
+    #[clap(long, action)]
+    pub maximized: bool,
+
     /// Start application in fullscreen.
     #[clap(long, action)]
     pub fullscreen: bool,
