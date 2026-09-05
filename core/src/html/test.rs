@@ -870,6 +870,21 @@ fn formatspans_replace_text_degenerate() {
 }
 
 #[test]
+fn html_tabstops_accept_bracketed_lists() {
+    for (attribute, expected) in [
+        ("[10,45,330,440]", vec![10.0, 45.0, 330.0, 440.0]),
+        ("10,45,330,440", vec![10.0, 45.0, 330.0, 440.0]),
+        ("[150,300]", vec![150.0, 300.0]),
+    ] {
+        let html = WString::from_utf8(&format!(
+            "<textformat tabstops='{attribute}'>\tA\tB</textformat>"
+        ));
+        let spans = FormatSpans::from_html(&html, TextFormat::default(), None, true, false, 15);
+        assert_eq!(spans.iter_spans().next().unwrap().3.tab_stops, expected);
+    }
+}
+
+#[test]
 fn html_image_preserves_attributes_and_space_anchor() {
     let spans = FormatSpans::from_html(
         WStr::from_units(b"<img src='Linked&amp;Image' id='a&amp;&quot;b' width='40' height='20' hspace='3' vspace='4' align='right'>AB"),

@@ -1027,6 +1027,11 @@ impl FormatSpans {
                             }
 
                             if let Some(tab_stops) = attribute(b"tabstops") {
+                                let tab_stops = tab_stops.trim();
+                                let tab_stops = tab_stops
+                                    .strip_prefix(b'[')
+                                    .and_then(|value| value.strip_suffix(b']'))
+                                    .unwrap_or(tab_stops);
                                 format.tab_stops = Some(
                                     tab_stops
                                         .split(b',')
