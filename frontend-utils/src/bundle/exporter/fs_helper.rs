@@ -108,9 +108,8 @@ impl<P: AsRef<Path>> FilesystemHelper<P> {
                 Ok(url)
             }
 
-            return path_to_url_non_unix(&bundle_path).map_err(|_| {
-                FilesystemHelperError::PathNotRepresentableAsUrl(real_path.to_owned())
-            });
+            path_to_url_non_unix(&bundle_path)
+                .map_err(|_| FilesystemHelperError::PathNotRepresentableAsUrl(real_path.to_owned()))
         }
     }
 
