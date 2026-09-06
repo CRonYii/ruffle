@@ -1,3 +1,6 @@
+#[cfg(any(windows, test))]
+mod windows_fonts;
+
 use crate::cli::OpenUrlMode;
 use crate::custom_event::RuffleEvent;
 use crate::gui::dialogs::message_dialog::MessageDialogConfiguration;
@@ -361,6 +364,12 @@ impl UiBackend for DesktopUiBackend {
                     .inspect_err(|err| tracing::error!("Cannot sort device fonts: {err}"))
                     .unwrap_or_default()
             }
+            windows => windows_fonts::sort_device_fonts(
+                &self.font_database,
+                query,
+                register,
+                self.device_font_renderer,
+            ),
             _ => Vec::new(),
         }
     }
